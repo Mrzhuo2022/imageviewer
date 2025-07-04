@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, QSize, Signal, QSortFilterProxyModel
-from PySide6.QtGui import QIcon, QStandardItemModel, QStandardItem, QPixmap
+from PySide6.QtGui import QIcon, QStandardItemModel, QStandardItem, QPixmap, QKeyEvent
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListView, QLineEdit, QMenu, QMessageBox, QInputDialog, QLabel, QDialog, QScrollArea, QPushButton, QHBoxLayout
 )
@@ -234,11 +234,51 @@ class ThumbnailGallery(QWidget):
             return
 
         menu = QMenu()
-        delete_action = menu.addAction("Delete Folder")
+        rename_action = menu.addAction(ICONS["rename"], "Rename Category") # New action
+        delete_action = menu.addAction(ICONS["delete"], "Delete Category") # Changed text and added icon
         action = menu.exec(self.category_buttons_widget.mapToGlobal(pos)) # Map position relative to the widget
 
         if action == delete_action:
             self.delete_category_folder(folder_name)
+        elif action == rename_action:
+            self.rename_category_folder(folder_name)
+
+    def rename_category_folder(self, old_folder_name):
+        new_folder_name, ok = QInputDialog.getText(self, "Rename Category", "Enter new category name:",
+                                                 QLineEdit.Normal, old_folder_name)
+        if ok and new_folder_name and new_folder_name != old_folder_name:
+            # Sanitize new_folder_name
+            sanitized_name = "".join(c for c in new_folder_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            sanitized_name = sanitized_name.replace(" ", "_")
+            if not sanitized_name:
+                self.status_message.emit("Invalid new category name.", 3000)
+                return
+
+            old_path = LIBRARY_DIR / old_folder_name
+            new_path = LIBRARY_DIR / sanitized_name
+
+            if new_path.exists():
+                self.status_message.emit(f"Category '{sanitized_name}' already exists.", 3000)
+                return
+
+            try:
+                # Rename folder on disk
+                old_path.rename(new_path)
+
+                # Update metadata for all images in this category
+                metadata = image_utils.load_metadata()
+                for image_id, item_data in metadata.items():
+                    if item_data.get("subfolder", "") == old_folder_name:
+                        item_data["subfolder"] = sanitized_name
+                        # Also update library_path to reflect new folder location
+                        old_library_path = Path(item_data["library_path"])
+                        item_data["library_path"] = str(new_path / old_library_path.name)
+                image_utils.save_metadata(metadata)
+
+                self.status_message.emit(f"Category '{old_folder_name}' renamed to '{sanitized_name}'.", 5000)
+                self.load_thumbnails(self.current_folder) # Reload current view
+            except Exception as e:
+                self.status_message.emit(f"Error renaming category: {e}", 0)
 
     def delete_category_folder(self, folder_name):
         reply = QMessageBox.question(self, "Confirm Deletion",
@@ -321,17 +361,68 @@ class ThumbnailGallery(QWidget):
             if isinstance(image_data, dict) and "library_path" in image_data: # Ensure it's an image item
                 menu = QMenu()
                 rename_action = menu.addAction(ICONS["rename"], "Rename Image")
-                change_category_action = menu.addAction(ICONS["import"], "Change Category") # Added icon
-                delete_selected_action = menu.addAction(ICONS["delete"], "Delete Selected Images")
+                change_selected_category_action = menu.addAction(ICONS["import"], "Change  Images Category") # New action
+                delete_selected_action = menu.addAction(ICONS["delete"], "Delete  Images")
                 
                 action = menu.exec(self.thumbnail_view.mapToGlobal(position))
 
                 if action == rename_action:
                     self.rename_image(image_data["image_id"], image_data["original_filename"])
-                elif action == change_category_action:
-                    self.change_image_category(image_data["image_id"])
+                
+                elif action == change_selected_category_action:
+                    self.change_selected_images_category()
                 elif action == delete_selected_action:
                     self.delete_selected_images()
+
+    def change_selected_images_category(self):
+        selected_indexes = self.thumbnail_view.selectionModel().selectedIndexes()
+        if not selected_indexes:
+            self.status_message.emit("No images selected for changing category.", 3000)
+            return
+
+        dialog = FolderSelectionDialog(parent=self)
+        if dialog.exec():
+            new_subfolder = dialog.get_selected_folder()
+
+            metadata = image_utils.load_metadata()
+            images_moved_count = 0
+
+            for index in selected_indexes:
+                source_index = self.proxy_model.mapToSource(index)
+                item = self.thumbnail_model.itemFromIndex(source_index)
+                image_id = item.data(Qt.UserRole + 1) # Retrieve image_id
+
+                if image_id and image_id in metadata:
+                    item_data = metadata[image_id]
+                    current_subfolder = item_data.get("subfolder", "")
+
+                    if new_subfolder == current_subfolder:
+                        continue # Skip if already in the selected category
+
+                    try:
+                        old_library_path = Path(item_data["library_path"])
+                        
+                        # Construct new library path
+                        new_library_dir = LIBRARY_DIR / new_subfolder
+                        new_library_dir.mkdir(parents=True, exist_ok=True)
+                        new_library_path = new_library_dir / old_library_path.name
+
+                        # Move the file on disk
+                        shutil.move(str(old_library_path), str(new_library_path))
+
+                        # Update metadata
+                        item_data["library_path"] = str(new_library_path)
+                        item_data["subfolder"] = new_subfolder
+                        images_moved_count += 1
+                    except Exception as e:
+                        self.status_message.emit(f"Error moving image {item_data['original_filename']}: {e}", 0)
+            
+            if images_moved_count > 0:
+                image_utils.save_metadata(metadata)
+                self.status_message.emit(f"Successfully moved {images_moved_count} images to category '{new_subfolder if new_subfolder else "Root Folder"}'.", 5000)
+                self.load_thumbnails(self.current_folder) # Reload current view
+            else:
+                self.status_message.emit("No images were moved.", 3000)
 
     def delete_selected_images(self):
         selected_indexes = self.thumbnail_view.selectionModel().selectedIndexes()
@@ -361,43 +452,39 @@ class ThumbnailGallery(QWidget):
             except Exception as e:
                 self.status_message.emit(f"Error during batch deletion: {e}", 0)
 
-    def change_image_category(self, image_id):
-        metadata = image_utils.load_metadata()
-        if image_id not in metadata:
-            self.status_message.emit("Image not found for changing category.", 3000)
-            return
-
-        item_data = metadata[image_id]
-        current_subfolder = item_data.get("subfolder", "")
-
-        dialog = FolderSelectionDialog(current_gallery_folder=current_subfolder, parent=self)
-        if dialog.exec():
-            new_subfolder = dialog.get_selected_folder()
-
-            if new_subfolder == current_subfolder:
-                self.status_message.emit("Image is already in the selected category.", 3000)
-                return
-
-            try:
-                old_library_path = Path(item_data["library_path"])
-                
-                # Construct new library path
-                new_library_dir = LIBRARY_DIR / new_subfolder
-                new_library_dir.mkdir(parents=True, exist_ok=True)
-                new_library_path = new_library_dir / old_library_path.name
-
-                # Move the file on disk
-                shutil.move(str(old_library_path), str(new_library_path))
-
-                # Update metadata
-                item_data["library_path"] = str(new_library_path)
-                item_data["subfolder"] = new_subfolder
-                image_utils.save_metadata(metadata)
-
-                self.status_message.emit(f"Image moved to category '{new_subfolder if new_subfolder else "Root Folder"}'.", 3000)
-                self.load_thumbnails(self.current_folder) # Reload current view
-            except Exception as e:
-                self.status_message.emit(f"Error changing image category: {e}", 0)
+    def get_current_image_list(self):
+        """获取当前显示的图片列表"""
+        image_list = []
+        
+        # 遍历当前模型中的所有项目
+        for row in range(self.proxy_model.rowCount()):
+            proxy_index = self.proxy_model.index(row, 0)
+            source_index = self.proxy_model.mapToSource(proxy_index)
+            item_data = self.thumbnail_model.itemFromIndex(source_index).data(Qt.UserRole)
+            
+            # 只添加图片数据，不添加文件夹数据
+            if isinstance(item_data, dict) and "library_path" in item_data:
+                image_list.append(item_data)
+        
+        return image_list
+    
+    def select_image_by_data(self, image_data):
+        """根据图片数据选择图片"""
+        target_path = image_data["library_path"]
+        
+        # 查找匹配的项目
+        for row in range(self.proxy_model.rowCount()):
+            proxy_index = self.proxy_model.index(row, 0)
+            source_index = self.proxy_model.mapToSource(proxy_index)
+            item_data = self.thumbnail_model.itemFromIndex(source_index).data(Qt.UserRole)
+            
+            if isinstance(item_data, dict) and item_data.get("library_path") == target_path:
+                # 选择该项目
+                self.thumbnail_view.setCurrentIndex(proxy_index)
+                self.thumbnail_view.scrollTo(proxy_index)
+                # 手动触发选择事件
+                self.image_selected.emit(item_data)
+                break
 
     def rename_image(self, image_id, current_filename):
         new_filename, ok = QInputDialog.getText(self, "Rename Image", "Enter new filename:",

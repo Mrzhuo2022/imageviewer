@@ -25,6 +25,10 @@ ICONS = {
     "zoom-out": QIcon(str(ICONS_DIR / "zoom-out.svg")),
     "zoom-actual": QIcon(str(ICONS_DIR / "zoom-actual.svg")),
     "fit-to-window": QIcon(str(ICONS_DIR / "fit-to-window.svg")),
+    "add": QIcon(str(ICONS_DIR / "add.svg")),
+    "upscale": QIcon(str(ICONS_DIR / "upscale.svg")),
+    "arrow-left": QIcon(str(ICONS_DIR / "arrow-left.svg")),
+    "arrow-right": QIcon(str(ICONS_DIR / "arrow-right.svg")),
 }
 
 # --- Stylesheet ---
