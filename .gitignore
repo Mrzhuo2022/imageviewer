@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python/
+env/
+venv/
+*.egg-info/
+.tox/
+.pytest_cache/
+dist/
+build/
+
+# IDEs
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# PDM
+# pdm.lock # Should generally be committed for reproducible builds
+
+# Image Manager specific
+.image_manager_data/
+image_library/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
