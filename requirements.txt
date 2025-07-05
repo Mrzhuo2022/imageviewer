@@ -1,0 +1,25 @@
+# Image Manager - Requirements
+# Generated from pyproject.toml
+
+# GUI Framework
+PySide6>=6.9.1
+
+# Image Processing
+Pillow>=11.3.0
+
+# AI Super Resolution
+realesrgan>=0.3.0
+
+# Deep Learning
+--index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
+
+# Utilities
+psutil>=5.9.0
+numpy<2.0
+
+# AI Model Dependencies
+basicsr>=1.4.2
+facexlib>=0.3.0
+gfpgan>=1.3.8
