@@ -1,6 +1,11 @@
-from PySide6.QtCore import Qt, QSize, Signal, QPoint, QRect, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPixmap, QAction, QPainter, QCursor
+import warnings
+from PIL import Image
+from PySide6.QtCore import Qt, QSize, Signal, QPoint, QRect, QPropertyAnimation, QEasingCurve, QTimer
+from PySide6.QtGui import QPixmap, QAction, QPainter
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QGraphicsOpacityEffect
+
+# Suppress PIL decompression bomb warnings since we handle large images ourselves
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 
 from ..config import ICONS
 
@@ -13,7 +18,8 @@ class ImageViewer(QWidget):
         super().__init__(parent)
         self.current_pixmap = None
         self.zoom_factor = 1.0
-        self.min_zoom_factor = 0.1 # Minimum zoom level (10% of actual size)
+        self.fit_to_window_zoom = 1.0  # 保存fit to window时的缩放比例作为100%基准
+        self.min_zoom_factor = 0.01 # Minimum zoom level (1% of actual size) - for very large images
         self.max_zoom_factor = 10.0 # Maximum zoom level (1000% of actual size)
         self.is_fitted_to_window = True  # Flag to control fit-to-window on resize
         self.pan_offset = QPoint(0, 0)  # Current pan offset
@@ -24,9 +30,15 @@ class ImageViewer(QWidget):
         self.mouse_in_nav_zone = False  # 鼠标是否在任何导航区域内
         self.buttons_have_focus = False  # 按钮是否有焦点（被悬停或点击）
         self.nav_zone_width = 120  # 导航区域宽度（像素）
+        self.current_image_path = None  # 当前图片路径
+        
+        # Performance optimization: cache scaled pixmaps
+        self.scaled_pixmap_cache = {}
+        self.max_cache_size = 5  # Maximum number of cached scales
 
         self.setMouseTracking(True)  # Enable mouse tracking
         self.setCursor(Qt.OpenHandCursor) # Default cursor for panning
+        self.setFocusPolicy(Qt.StrongFocus)  # 允许接收键盘焦点
 
         self.init_ui()
 
@@ -43,9 +55,15 @@ class ImageViewer(QWidget):
         self.zoom_out_action = QAction(ICONS["zoom-out"], "Zoom Out", self)
         self.zoom_actual_action = QAction(ICONS["zoom-actual"], "Actual Size (1:1)", self)
         self.fit_to_window_action = QAction(ICONS["fit-to-window"], "Fit to Window", self)
+        self.fullscreen_action = QAction(ICONS["fullscreen"], "Fullscreen Image View", self)
+        self.fullscreen_action.setShortcut("F11")
+        self.fullscreen_action.triggered.connect(self.show_fullscreen)
         
         # 创建浮动导航按钮
         self.create_navigation_buttons()
+        
+        # 创建缩放百分比显示
+        self.create_zoom_indicator()
 
     def create_navigation_buttons(self):
         """创建浮动的导航按钮"""
@@ -121,14 +139,99 @@ class ImageViewer(QWidget):
         self.prev_button.hide()
         self.next_button.hide()
 
+    def create_zoom_indicator(self):
+        """创建缩放百分比指示器"""
+        # 创建缩放百分比标签
+        self.zoom_label = QLabel("100%", self)
+        self.zoom_label.setFixedSize(80, 25)  # 增加宽度以适应更长的文字
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        
+        # 设置样式
+        zoom_label_style = """
+            QLabel {
+                background-color: rgba(52, 73, 94, 220);
+                border: 1px solid rgba(149, 165, 166, 150);
+                border-radius: 12px;
+                color: #ecf0f1;
+                font-weight: bold;
+                font-size: 10pt;
+                font-family: 'Consolas', 'Monaco', monospace;
+            }
+        """
+        self.zoom_label.setStyleSheet(zoom_label_style)
+        
+        # 创建透明度效果
+        self.zoom_opacity_effect = QGraphicsOpacityEffect()
+        self.zoom_label.setGraphicsEffect(self.zoom_opacity_effect)
+        
+        # 创建透明度动画
+        self.zoom_opacity_animation = QPropertyAnimation(self.zoom_opacity_effect, b"opacity")
+        self.zoom_opacity_animation.setDuration(300)
+        self.zoom_opacity_animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # 创建自动隐藏计时器
+        self.zoom_hide_timer = QTimer()
+        self.zoom_hide_timer.timeout.connect(self.hide_zoom_indicator)
+        self.zoom_hide_timer.setSingleShot(True)
+        
+        # 初始状态隐藏
+        self.zoom_opacity_effect.setOpacity(0.0)
+        self.zoom_label.hide()
+
     def update_pixmap_display(self):
         if not self.current_pixmap:
             return
 
-        scaled_pixmap = self.current_pixmap.scaled(
-            self.current_pixmap.size() * self.zoom_factor,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
+        # Calculate image memory usage
+        original_width = self.current_pixmap.width()
+        original_height = self.current_pixmap.height()
+        image_size_mb = (original_width * original_height * 4) / (1024 * 1024)
+        
+        # Use the actual zoom factor for display
+        actual_scale_factor = self.zoom_factor
+        
+        # Aggressive memory optimization for large images
+        if image_size_mb > 50:  # For images larger than 50MB in memory
+            # Calculate maximum safe scale factor - more conservative limits
+            max_display_pixels = 25_000_000  # Limit to ~25MP display (roughly 400MB at 4 bytes/pixel)
+            current_pixels = original_width * original_height
+            
+            if current_pixels * (actual_scale_factor ** 2) > max_display_pixels:
+                max_scale_factor = (max_display_pixels / current_pixels) ** 0.5
+                if actual_scale_factor > max_scale_factor:
+                    print(f"Performance optimization: limiting scale {actual_scale_factor:.3f} → {max_scale_factor:.3f}")
+                    actual_scale_factor = max_scale_factor
+
+        # Calculate target size
+        target_width = int(original_width * actual_scale_factor)
+        target_height = int(original_height * actual_scale_factor)
+        
+        # Ensure minimum size to prevent invisible images
+        if target_width < 1:
+            target_width = 1
+        if target_height < 1:
+            target_height = 1
+        
+        # Check cache first
+        cache_key = f"{target_width}x{target_height}"
+        if cache_key in self.scaled_pixmap_cache:
+            scaled_pixmap = self.scaled_pixmap_cache[cache_key]
+        else:
+            # Use fast transformation for all scaling to improve performance
+            transformation_mode = Qt.FastTransformation if image_size_mb > 200 else Qt.SmoothTransformation
+            
+            scaled_pixmap = self.current_pixmap.scaled(
+                target_width, target_height,
+                Qt.KeepAspectRatio, transformation_mode
+            )
+            
+            # Cache the scaled pixmap (with LRU-like management)
+            if len(self.scaled_pixmap_cache) >= self.max_cache_size:
+                # Remove oldest cache entry
+                oldest_key = next(iter(self.scaled_pixmap_cache))
+                del self.scaled_pixmap_cache[oldest_key]
+            
+            self.scaled_pixmap_cache[cache_key] = scaled_pixmap
 
         # Calculate the top-left corner to draw the scaled image, considering pan_offset
         x = (self.image_label.width() - scaled_pixmap.width()) // 2 + self.pan_offset.x()
@@ -148,21 +251,53 @@ class ImageViewer(QWidget):
         new_zoom_factor = self.zoom_factor * 1.25
         if new_zoom_factor <= self.max_zoom_factor:
             self.zoom_factor = new_zoom_factor
-            self.is_fitted_to_window = False  # Manual zoom, so not fitted
+            self.is_fitted_to_window = False
             self.update_pixmap_display()
+            self.show_zoom_indicator()  # 显示缩放百分比
 
     def zoom_out(self):
         new_zoom_factor = self.zoom_factor / 1.25
-        if new_zoom_factor >= self.min_zoom_factor:
+        dynamic_min_zoom = self.get_dynamic_min_zoom()
+        
+        if new_zoom_factor >= dynamic_min_zoom:
             self.zoom_factor = new_zoom_factor
-            self.is_fitted_to_window = False  # Manual zoom, so not fitted
+            self.is_fitted_to_window = False
             self.update_pixmap_display()
+            self.show_zoom_indicator()  # 显示缩放百分比
 
     def zoom_to_actual_size(self):
+        # 计算fit-to-window的缩放比例作为基准
+        if self.current_pixmap and self.image_label.width() > 1 and self.image_label.height() > 1:
+            label_size = self.image_label.size()
+            pixmap_size = self.current_pixmap.size()
+            if pixmap_size.width() > 0 and pixmap_size.height() > 0:
+                width_scale = label_size.width() / pixmap_size.width()
+                height_scale = label_size.height() / pixmap_size.height()
+                self.fit_to_window_zoom = min(width_scale, height_scale)  # 保存基准
+        
         self.zoom_factor = 1.0
-        self.is_fitted_to_window = False  # Manual zoom, so not fitted
-        self.pan_offset = QPoint(0, 0) # Reset pan offset
+        self.is_fitted_to_window = False
+        self.pan_offset = QPoint(0, 0)
         self.update_pixmap_display()
+        self.show_zoom_indicator()  # 显示缩放百分比
+
+    def get_dynamic_min_zoom(self):
+        """Calculate dynamic minimum zoom based on image size"""
+        if not self.current_pixmap:
+            return self.min_zoom_factor
+            
+        image_pixels = self.current_pixmap.width() * self.current_pixmap.height()
+        
+        if image_pixels > 100_000_000:  # > 100MP
+            return 0.005
+        elif image_pixels > 50_000_000:  # > 50MP  
+            return 0.01
+        elif image_pixels > 20_000_000:  # > 20MP
+            return 0.02
+        elif image_pixels > 10_000_000:  # > 10MP
+            return 0.05
+        else:
+            return 0.1
 
     def fit_to_window(self):
         if self.current_pixmap and self.image_label.width() > 1 and self.image_label.height() > 1:
@@ -176,34 +311,74 @@ class ImageViewer(QWidget):
             height_scale = label_size.height() / pixmap_size.height()
             
             self.zoom_factor = min(width_scale, height_scale)
-            self.is_fitted_to_window = True  # Image is now fitted to window
-            self.pan_offset = QPoint(0, 0) # Reset pan offset
+            self.fit_to_window_zoom = self.zoom_factor  # 保存这个比例作为100%基准
+            self.is_fitted_to_window = True
+            self.pan_offset = QPoint(0, 0)
             self.update_pixmap_display()
+            self.show_zoom_indicator()  # 显示缩放百分比
 
     def set_image(self, image_path, image_data):
-        self.current_pixmap = QPixmap(image_path)
-        self.image_data = image_data # Store image_data
-        self.zoom_factor = 1.0
-        self.pan_offset = QPoint(0, 0)
-        self.is_fitted_to_window = True
+        try:
+            self.scaled_pixmap_cache.clear()
+            self.image_label.setStyleSheet("")
+            
+            self.current_pixmap = QPixmap(image_path)
+            self.current_image_path = image_path  # 保存当前图片路径
+            
+            if self.current_pixmap.isNull():
+                self.show_image_error(image_path, "Failed to load image. File may be corrupted or too large.")
+                return
+                
+            # Check for very large images and show warning
+            image_size_mb = (self.current_pixmap.width() * self.current_pixmap.height() * 4) / (1024 * 1024)
+            if image_size_mb > 500:
+                self.show_image_warning(image_path, f"Very large image ({image_size_mb:.0f}MB in memory). Performance optimization enabled.")
+            
+            self.image_data = image_data
+            self.zoom_factor = 1.0
+            self.pan_offset = QPoint(0, 0)
+            self.is_fitted_to_window = True
+            
+            # Auto-fit or center image
+            if (self.current_pixmap.width() <= self.image_label.width() and 
+                self.current_pixmap.height() <= self.image_label.height()):
+                self.zoom_to_actual_size()
+            else:
+                self.fit_to_window()
+            
+            self.show_navigation_buttons()
+            
+        except Exception as e:
+            self.show_image_error(image_path, f"Error loading image: {str(e)}")
+
+    def show_image_error(self, image_path, error_message):
+        """Display error message when image fails to load"""
+        from pathlib import Path
+        filename = Path(image_path).name
+        error_text = f"Failed to load image: {filename}\n\n{error_message}\n\nTry:\n• Restart the application\n• Check available memory\n• Reduce image size"
         
-        # If image is smaller than label, display actual size and center
-        if self.current_pixmap.width() <= self.image_label.width() and \
-           self.current_pixmap.height() <= self.image_label.height():
-            self.zoom_to_actual_size()
-        else:
-            self.fit_to_window()
-        
-        # 显示导航按钮
-        self.show_navigation_buttons()
+        self.image_label.setText(error_text)
+        self.image_label.setStyleSheet("color: #e74c3c; padding: 20px; font-size: 12pt;")
+        self.current_pixmap = None
+        self.image_data = None
+        self.hide_navigation_buttons()
+
+    def show_image_warning(self, image_path, warning_message):
+        """Display warning for large images"""
+        from pathlib import Path
+        filename = Path(image_path).name
+        print(f"Image warning {filename}: {warning_message}")
 
     def clear_image(self):
+        self.scaled_pixmap_cache.clear()
         self.image_label.clear()
         self.image_label.setText("Select an image to view")
         self.current_pixmap = None
         self.image_data = None
-        # 隐藏导航按钮
         self.hide_navigation_buttons()
+        # 隐藏缩放指示器
+        if hasattr(self, 'zoom_label'):
+            self.zoom_label.hide()
 
     def wheelEvent(self, event):
         if not self.current_pixmap:
@@ -221,6 +396,9 @@ class ImageViewer(QWidget):
             self.fit_to_window()
         # 更新导航按钮位置
         self.update_navigation_buttons_position()
+        # 更新缩放指示器位置
+        if hasattr(self, 'zoom_label'):
+            self.update_zoom_indicator_position()
 
     def enterEvent(self, event):
         """鼠标进入图片查看器区域"""
@@ -437,3 +615,89 @@ class ImageViewer(QWidget):
         # 只有当状态真正需要改变时才更新
         if (should_show and current_opacity < 1.0) or (not should_show and current_opacity > 0.0):
             self.update_navigation_buttons_visibility(should_show)
+
+    def show_fullscreen(self):
+        """显示全屏图片查看器"""
+        if self.current_image_path and self.current_pixmap:
+            print(f"显示全屏图片: {self.current_image_path}")  # 调试信息
+            # 直接让主窗口全屏，而不是创建新窗口
+            main_window = self.window()
+            if not main_window.isFullScreen():
+                # 进入全屏前调整图片显示
+                self.fit_to_window()
+                main_window.showFullScreen()
+                # 全屏后再次调整图片适应
+                QTimer.singleShot(100, self.fit_to_window)
+            else:
+                main_window.showNormal()
+                # 退出全屏后调整图片显示
+                QTimer.singleShot(100, self.fit_to_window)
+        else:
+            print(f"无法显示全屏: current_image_path={self.current_image_path}, current_pixmap={bool(self.current_pixmap)}")  # 调试信息
+
+    def show_zoom_indicator(self):
+        """显示缩放百分比指示器"""
+        if not self.current_pixmap:
+            return
+            
+        # 计算基于fit-to-window的缩放百分比
+        if self.fit_to_window_zoom > 0:
+            zoom_percent = int((self.zoom_factor / self.fit_to_window_zoom) * 100)
+        else:
+            zoom_percent = int(self.zoom_factor * 100)
+        
+        # 添加状态指示
+        if abs(self.zoom_factor - self.fit_to_window_zoom) < 0.01:
+            # fit to window状态
+            display_text = "100%"
+        elif abs(self.zoom_factor - 1.0) < 0.01:
+            # 实际大小状态
+            actual_percent = int((1.0 / self.fit_to_window_zoom) * 100) if self.fit_to_window_zoom > 0 else 100
+            display_text = f"{actual_percent}%"
+        else:
+            # 其他缩放状态
+            display_text = f"{zoom_percent}%"
+            
+        self.zoom_label.setText(display_text)
+        
+        # 更新位置
+        self.update_zoom_indicator_position()
+        
+        # 显示指示器
+        self.zoom_label.show()
+        self.zoom_opacity_animation.setEndValue(0.9)
+        self.zoom_opacity_animation.start()
+        
+        # 设置自动隐藏计时器
+        self.zoom_hide_timer.stop()
+        self.zoom_hide_timer.start(1500)  # 1.5秒后隐藏
+        
+    def hide_zoom_indicator(self):
+        """隐藏缩放百分比指示器"""
+        self.zoom_opacity_animation.setEndValue(0.0)
+        self.zoom_opacity_animation.start()
+        
+    def update_zoom_indicator_position(self):
+        """更新缩放指示器的位置"""
+        if not self.current_pixmap:
+            return
+            
+        # 放置在右上角
+        margin = 15
+        x = self.width() - self.zoom_label.width() - margin
+        y = margin
+        self.zoom_label.move(x, y)
+
+    def mouseDoubleClickEvent(self, event):
+        """双击事件 - 也可以触发全屏"""
+        if event.button() == Qt.LeftButton:
+            print("双击检测到，尝试全屏")  # 调试信息
+            self.show_fullscreen()
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        """处理键盘事件"""
+        if event.key() == Qt.Key_F11:
+            self.show_fullscreen()
+        else:
+            super().keyPressEvent(event)

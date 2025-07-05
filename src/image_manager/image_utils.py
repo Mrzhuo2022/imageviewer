@@ -1,16 +1,91 @@
 import shutil
 import uuid
 import json
-import time # Import time module
+import time
+import psutil
+import gc
 from pathlib import Path
 from PIL import Image
 import numpy as np
-import onnxruntime as ort
+import logging
 
-from .config import LIBRARY_DIR, THUMBNAIL_DIR, THUMBNAIL_SIZE, METADATA_FILE, INTERNAL_DATA_DIR, ROOT_DIR
+# --- PyTorch & RealESRGAN Support ---
+try:
+    import torch
+    from realesrgan import RealESRGANer
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    PYTORCH_AVAILABLE = True
+except ImportError:
+    PYTORCH_AVAILABLE = False
+
+from .config import ROOT_DIR, LIBRARY_DIR, INTERNAL_DATA_DIR, THUMBNAIL_DIR, METADATA_FILE, THUMBNAIL_SIZE
+
+# Setup logger
+log = logging.getLogger(__name__)
+# Create separate logger for compression to avoid confusion with upscaling logs
+compression_log = logging.getLogger(f"{__name__}.compression")
+# Ensure basicsr logger (used by RealESRGANer) propagates to root logger
+# This allows our custom LogEmitter in main_window.py to capture its messages
+logging.getLogger('basicsr').propagate = True
+logging.getLogger('basicsr').setLevel(logging.INFO) # Ensure basicsr logs are INFO level
+
+# --- GPU & Environment Utilities ---
+
+def get_system_memory_info():
+    """
+    Gets available system RAM and total GPU VRAM.
+    """
+    ram = psutil.virtual_memory()
+    available_ram_mb = ram.available / (1024**2)
+    
+    gpu_memory_mb = 0
+    if PYTORCH_AVAILABLE and torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        gpu_memory_mb = props.total_memory / (1024**2)
+
+    return {"ram_available_mb": available_ram_mb, "gpu_total_mb": gpu_memory_mb}
+
+
+def clear_gpu_cache():
+    """
+    Clears the GPU memory cache for PyTorch.
+    """
+    gc.collect()
+    if PYTORCH_AVAILABLE and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        log.info("Cleared PyTorch GPU cache.")
+
+
+# --- File and Metadata Management ---
+
+def ensure_library_folders_exist():
+    """Creates the necessary library and thumbnail directories."""
+    LIBRARY_DIR.mkdir(exist_ok=True)
+    INTERNAL_DATA_DIR.mkdir(exist_ok=True)
+    THUMBNAIL_DIR.mkdir(exist_ok=True)
+
+
+def load_metadata():
+    """Loads the image library metadata from the JSON file."""
+    if METADATA_FILE.exists() and METADATA_FILE.stat().st_size > 0:
+        try:
+            with open(METADATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            log.warning(f"Metadata file {METADATA_FILE} is corrupted. Starting fresh.")
+            return {}
+    return {}
+
+
+def save_metadata(metadata):
+    """Saves the image library metadata to the JSON file."""
+    with open(METADATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=4, ensure_ascii=False)
+
 
 def get_unique_filename(directory, base_name, suffix):
-    """Generate a unique filename by adding a number suffix if the file already exists."""
+    """Generates a unique filename to avoid collisions."""
     file_path = directory / f"{base_name}{suffix}"
     counter = 1
     while file_path.exists():
@@ -18,416 +93,486 @@ def get_unique_filename(directory, base_name, suffix):
         counter += 1
     return file_path.name
 
-def ensure_library_folders_exist():
-    """Creates the necessary image and thumbnail directories if they don't exist."""
-    LIBRARY_DIR.mkdir(exist_ok=True)
-    INTERNAL_DATA_DIR.mkdir(exist_ok=True) # Create the internal data directory
-    THUMBNAIL_DIR.mkdir(exist_ok=True)
 
-def load_metadata():
-    """Loads image metadata from the JSON file."""
-    if METADATA_FILE.exists():
-        with open(METADATA_FILE, 'r', encoding='utf-8') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                print(f"Warning: {METADATA_FILE} is empty or contains invalid JSON. Returning empty metadata.")
-                return {}
-    return {}
-
-def save_metadata(metadata):
-    """Saves image metadata to the JSON file."""
-    print("Saving metadata...") # Debug print
-    with open(METADATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=4)
-    print("Metadata saved.") # Debug print
-
-def process_and_copy_image(original_path, target_subfolder=""):
-    """Copies an image to the library, creates a thumbnail, and returns all relevant data."""
+def add_image_to_library(original_path, target_subfolder=""):
+    """Copies an image to the library, creates a thumbnail, and updates metadata."""
     original_path = Path(original_path)
-    
-    # Generate a unique ID for the image
     image_id = str(uuid.uuid4())
     suffix = original_path.suffix.lower()
     
-    # Determine paths for the new image and thumbnail
     target_folder = LIBRARY_DIR / target_subfolder
-    target_folder.mkdir(parents=True, exist_ok=True) # Ensure subfolder exists
+    target_folder.mkdir(parents=True, exist_ok=True)
 
-    library_file_name = f"{image_id}{suffix}"
-    thumbnail_file_name = f"{image_id}{suffix}"
-
-    library_path = target_folder / library_file_name
-    thumbnail_path = THUMBNAIL_DIR / thumbnail_file_name
-
-    # Ensure unique file names
     library_file_name = get_unique_filename(target_folder, image_id, suffix)
-    thumbnail_file_name = get_unique_filename(THUMBNAIL_DIR, image_id, suffix)
+    thumbnail_file_name = get_unique_filename(THUMBNAIL_DIR, image_id, ".webp")
 
     library_path = target_folder / library_file_name
     thumbnail_path = THUMBNAIL_DIR / thumbnail_file_name
 
-    # 1. Copy file to library
     shutil.copy2(original_path, library_path)
 
-    # 2. Create thumbnail and get metadata
     width, height = 0, 0
     try:
         with Image.open(library_path) as img:
             width, height = img.size
             img.thumbnail(THUMBNAIL_SIZE)
-            img.save(thumbnail_path)
-            print(f"Thumbnail saved to: {thumbnail_path}") # Debug print
+            img.save(thumbnail_path, "WEBP", quality=85)
     except Exception as e:
-        print(f"Warning: Could not process image {original_path.name}: {e}")
-        # If image processing fails, still record basic metadata
-        pass
+        log.error(f"Could not process image {original_path.name}: {e}")
+        # Clean up if thumbnail generation fails
+        library_path.unlink(missing_ok=True)
+        return None
 
-    # 3. Update metadata
     metadata = load_metadata()
     metadata[image_id] = {
         "original_filename": original_path.name,
-        "library_path": str(library_path),
-        "thumbnail_path": str(thumbnail_path),
+        "library_path": str(library_path.as_posix()),
+        "thumbnail_path": str(thumbnail_path.as_posix()),
         "width": width,
         "height": height,
         "size_bytes": library_path.stat().st_size,
-        "subfolder": target_subfolder, # Store the subfolder information
-        "timestamp": time.time() # Add timestamp
+        "subfolder": target_subfolder,
+        "timestamp": time.time()
     }
     save_metadata(metadata)
-
-    # 4. Return data for UI update (optional, as UI will reload from metadata)
+    
     item_data = metadata[image_id]
-    item_data["image_id"] = image_id # Add image_id to the item_data dictionary
+    item_data["image_id"] = image_id
     return item_data
 
-def get_model_scale_factor(model_path):
-    """Determine the scale factor based on the model filename."""
-    model_name = Path(model_path).stem.lower()
-    if 'x2' in model_name:
-        return 2
-    elif 'x4' in model_name:
-        return 4
-    else:
-        # Default to 4 if can't determine
-        return 4
 
-def upscale_image(image_path, model_path, progress_callback=None):
+def remove_image_from_library(image_id):
+    """Removes an image and its thumbnail from the library and metadata."""
+    metadata = load_metadata()
+    if image_id in metadata:
+        item_data = metadata.pop(image_id)
+        Path(item_data["library_path"]).unlink(missing_ok=True)
+        Path(item_data["thumbnail_path"]).unlink(missing_ok=True)
+        save_metadata(metadata)
+        log.info(f"Removed image: {image_id}")
+    else:
+        log.warning(f"Image ID {image_id} not found in metadata.")
+
+
+# --- Core Upscaling Logic ---
+
+def get_model_scale_factor(model_path):
+    """Infers the model's scale factor from its filename."""
+    model_name = Path(model_path).stem.lower()
+    if 'x8' in model_name: return 8
+    if 'x4' in model_name: return 4
+    if 'x2' in model_name: return 2
+    return 4 # Default scale
+
+
+def get_available_models():
+    """Finds all available .pth models in the 'models' directory."""
+    models_dir = ROOT_DIR / "models"
+    available_models = []
+    if models_dir.is_dir():
+        for file in sorted(models_dir.iterdir()):
+            if file.suffix.lower() == '.pth':
+                if not PYTORCH_AVAILABLE:
+                    continue # Skip PyTorch models if environment is not set up
+                available_models.append({"name": file.stem, "path": str(file), "type": 'PyTorch'})
+    return available_models
+
+
+def upscale_image(image_path, model_path, progress_callback=None, max_output_size=None):
     """
-    Upscale an image using ONNX RealESRGAN model.
+    Dispatches the upscaling task to the appropriate engine based on model type.
+    Args:
+        image_path: Path to input image
+        model_path: Path to model file
+        progress_callback: Optional progress callback function
+        max_output_size: Optional tuple (width, height) to limit output size
+    """
+    model_path = Path(model_path)
+    log.info(f"Starting upscale task for {image_path} with model {model_path.name}")
+
+    try:
+        if model_path.suffix.lower() == '.pth':
+            if PYTORCH_AVAILABLE:
+                log.info("Using PyTorch RealESRGAN engine.")
+                return _upscale_with_pytorch(image_path, str(model_path), progress_callback, max_output_size)
+            else:
+                log.error("Cannot process .pth model: PyTorch/RealESRGAN not available.")
+                return None
+        else:
+            log.error(f"Unsupported model format: {model_path.suffix}. Only .pth models are supported.")
+            return None
+            
+    except Exception as e:
+        log.error(f"An unexpected error occurred during upscaling: {e}", exc_info=True)
+        clear_gpu_cache()
+        return None
+
+
+def _upscale_with_pytorch(image_path, model_path, progress_callback=None, max_output_size=None):
+    """
+    Upscales an image using PyTorch and RealESRGAN, with optional output size limiting.
+    Args:
+        max_output_size: Optional tuple (width, height) to limit output size
+    """
+
+    def run_upscale_attempt(tile_size):
+        """Inner function to run a single upscale attempt."""
+        upsampler = None
+        model = None
+        try:
+            log.info(f"Initializing PyTorch upsampler with tile size: {tile_size if tile_size > 0 else 'Disabled'}")
+            if progress_callback: progress_callback(5)
+            
+            model_name = Path(model_path).stem.lower()
+            scale = get_model_scale_factor(model_path)
+            num_block = 6 if 'anime' in model_name else 23
+            
+            log.info(f"Loading image {Path(image_path).name}...")
+            if progress_callback: progress_callback(10)
+            img = Image.open(image_path).convert('RGB')
+            img_np = np.array(img)
+            
+            # Check if we need to limit output size
+            original_size = (img.width, img.height)
+            target_size = (img.width * scale, img.height * scale)
+            
+            if max_output_size:
+                max_w, max_h = max_output_size
+                if target_size[0] > max_w or target_size[1] > max_h:
+                    # Calculate scale factor to fit within limits
+                    scale_w = max_w / target_size[0]
+                    scale_h = max_h / target_size[1]
+                    limit_scale = min(scale_w, scale_h)
+                    
+                    new_target_size = (int(target_size[0] * limit_scale), int(target_size[1] * limit_scale))
+                    log.info(f"Limiting output size: {target_size} → {new_target_size}")
+                    target_size = new_target_size
+            
+            log.info(f"Processing: {img.width}x{img.height} → {target_size[0]}x{target_size[1]}")
+            if progress_callback: progress_callback(15)
+
+            log.info(f"Initializing model: {Path(model_path).name}")
+            if progress_callback: progress_callback(20)
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=num_block, num_grow_ch=32, scale=scale)
+            
+            # Calculate outscale based on target size vs model scale
+            outscale = min(target_size[0] / img.width, target_size[1] / img.height)
+            
+            upsampler = RealESRGANer(
+                scale=scale, model_path=model_path, model=model, tile=tile_size,
+                tile_pad=10, pre_pad=0, half=True, device=torch.device('cuda')
+            )
+            log.info("RealESRGANer initialized successfully")
+            if progress_callback: progress_callback(30)
+
+            log.info("Starting PyTorch inference...")
+            if progress_callback: progress_callback(35)
+            start_time = time.time()
+            
+            # Enhanced progress tracking during inference
+            log.info("Processing image with AI model...")
+            if progress_callback: progress_callback(50)
+            
+            output, _ = upsampler.enhance(img_np, outscale=outscale)
+            inference_time = time.time() - start_time
+            log.info(f"PyTorch inference complete in {inference_time:.2f}s.")
+            if progress_callback: progress_callback(85)
+            
+            log.info("Post-processing and converting image...")
+            if progress_callback: progress_callback(95)
+            result_image = Image.fromarray(output)
+            
+            # Final resize if needed to match exact target size
+            if result_image.size != target_size:
+                result_image = result_image.resize(target_size, Image.Resampling.LANCZOS)
+                log.info(f"Resized to target: {result_image.size}")
+            
+            log.info("Upscaling completed successfully")
+            if progress_callback: progress_callback(100)
+            
+            return result_image
+            
+        except Exception as e:
+            log.error(f"Upscaling error: {e}")
+            raise
+        finally:
+            log.info("Cleaning up GPU memory...")
+            del upsampler, model
+            clear_gpu_cache()
+
+    # --- Main logic for _upscale_with_pytorch ---
+    log.info("Starting PyTorch upscaling process...")
+    clear_gpu_cache()
+    if not torch.cuda.is_available():
+        log.error("CUDA is not available for PyTorch.")
+        raise RuntimeError("CUDA is not available for PyTorch.")
+    
+    log.info("CUDA is available, proceeding with GPU acceleration")
+    if progress_callback: progress_callback(2)
+
+    try:
+        # Attempt 1: No tiling
+        log.info("Attempting upscaling without tiling...")
+        result_img = run_upscale_attempt(tile_size=0)
+        return result_img
+    except torch.cuda.OutOfMemoryError:
+        log.warning("CUDA out of memory on first attempt. Retrying with tiling...")
+        if progress_callback: progress_callback(30)  # Reset progress for retry
+        clear_gpu_cache() # Clean up before the next attempt
+        
+        # Attempt 2: With tiling
+        log.info("Attempting upscaling with tiling (512px tiles)...")
+        result_img = run_upscale_attempt(tile_size=512)
+        return result_img
+
+
+# --- Image Compression Functions ---
+
+def _get_optimal_compression_params(output_format, quality):
+    """Get optimal compression parameters for different formats."""
+    params = {}
+    
+    if output_format == 'JPEG':
+        params = {
+            'quality': max(1, min(100, quality)),
+            'optimize': True,
+            'progressive': quality >= 75,  # Progressive only for higher quality
+            'subsampling': 0 if quality >= 95 else -1  # No subsampling for highest quality
+        }
+    elif output_format == 'PNG':
+        # PNG compression level (0-9, higher = better compression but slower)
+        compress_level = max(0, min(9, int((100 - quality) / 10)))
+        params = {
+            'compress_level': compress_level,
+            'optimize': True
+        }
+    elif output_format == 'WEBP':
+        params = {
+            'quality': max(1, min(100, quality)),
+            'optimize': True,
+            'method': 6 if quality >= 80 else 4,  # Better method for higher quality
+            'lossless': quality >= 98  # Lossless for very high quality
+        }
+    
+    return params
+
+
+def _convert_image_mode(img, target_format):
+    """Convert image mode appropriately for target format."""
+    if target_format == 'JPEG':
+        if img.mode in ('RGBA', 'LA'):
+            # Create white background for transparency
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'LA':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1])
+            return background
+        elif img.mode == 'P':
+            # Convert palette to RGB/RGBA first
+            if img.info.get('transparency') is not None:
+                img = img.convert('RGBA')
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[-1])
+                return background
+            else:
+                return img.convert('RGB')
+        elif img.mode not in ('RGB', 'L'):
+            return img.convert('RGB')
+    elif target_format == 'PNG':
+        # PNG supports all modes, but optimize for common cases
+        if img.mode == 'P' and len(img.getcolors() or []) <= 256:
+            return img  # Keep palette mode for small color count
+        elif img.mode in ('LA', 'RGBA'):
+            return img  # Keep alpha channel
+        elif img.mode == 'L':
+            return img  # Keep grayscale
+    elif target_format == 'WEBP':
+        # WebP supports RGB and RGBA
+        if img.mode in ('RGBA', 'LA'):
+            return img.convert('RGBA')
+        else:
+            return img.convert('RGB')
+    
+    return img
+
+
+def compress_image(image_path, quality=85, output_format=None, max_size=None, progress_callback=None):
+    """
+    Compress an image with specified quality and optional resizing.
     
     Args:
-        image_path: Path to the input image
-        model_path: Path to the ONNX model
+        image_path: Path to input image
+        quality: Compression quality (1-100)
+        output_format: Output format ('JPEG', 'PNG', 'WEBP') or None to keep original
+        max_size: Optional tuple (width, height) to resize image before compression
         progress_callback: Optional progress callback function
     
     Returns:
-        PIL Image or None if failed
+        Tuple of (PIL.Image, format_str, save_params) or (None, None, None) if failed
+    """
+    image_path = Path(image_path)
+    
+    if not image_path.exists():
+        log.error(f"Image file not found: {image_path}")
+        return None, None, None
+        
+    try:
+        compression_log.info(f"Starting compression for {image_path.name}")
+        if progress_callback:
+            progress_callback(5)
+        
+        # Open image with context manager
+        with Image.open(image_path) as original_img:
+            # Determine output format
+            if output_format is None:
+                output_format = original_img.format or 'JPEG'
+            
+            if progress_callback:
+                progress_callback(15)
+            
+            # Convert image mode if needed
+            img = _convert_image_mode(original_img, output_format)
+            
+            if progress_callback:
+                progress_callback(30)
+            
+            # Apply resizing if specified
+            if max_size and (img.width > max_size[0] or img.height > max_size[1]):
+                original_size = img.size
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                compression_log.info(f"Resized from {original_size} to {img.size}")
+            
+            if progress_callback:
+                progress_callback(60)
+            
+            # Get compression parameters
+            save_params = _get_optimal_compression_params(output_format, quality)
+            
+            if progress_callback:
+                progress_callback(80)
+            
+            # Create a copy to avoid modifying original
+            compressed_img = img.copy() if img is not original_img else original_img.copy()
+            
+            if progress_callback:
+                progress_callback(100)
+            
+            compression_log.info(f"Compression prepared: {output_format}, quality {quality}, size {compressed_img.size}")
+            return compressed_img, output_format, save_params
+            
+    except (OSError, IOError) as e:
+        log.error(f"Failed to open/process image {image_path.name}: {e}")
+        return None, None, None
+    except Exception as e:
+        log.error(f"Unexpected error during compression of {image_path.name}: {e}")
+        return None, None, None
+
+
+def get_compression_preview(image_path, quality=85, output_format=None, max_size=None):
+    """
+    Get compression preview with file size estimation.
+    
+    Args:
+        image_path: Path to input image
+        quality: Compression quality (1-100)
+        output_format: Output format
+        max_size: Optional resize dimensions
+    
+    Returns:
+        Dictionary with compression info or None if failed
     """
     try:
-        # Determine device - prioritize CPU to avoid memory issues
-        providers = ['CPUExecutionProvider']  # Force CPU for stability
-        print("Using CPUExecutionProvider (CPU) for stability")
-
-        # Determine scale factor from model name
-        scale_factor = get_model_scale_factor(model_path)
-        print(f"Scale factor: {scale_factor}")
-
-        # Load ONNX model
-        if not Path(model_path).exists():
-            raise FileNotFoundError(f"ONNX model not found at {model_path}")
+        import io
         
-        try:
-            session = ort.InferenceSession(str(model_path), providers=providers)
-        except Exception as e:
-            print(f"Failed to load ONNX model: {e}")
+        image_path = Path(image_path)
+        if not image_path.exists():
+            compression_log.error(f"Image file not found for preview: {image_path}")
             return None
-            
-        input_name = session.get_inputs()[0].name
-        output_name = session.get_outputs()[0].name
         
-        # Get input shape requirements
-        input_shape = session.get_inputs()[0].shape
-        print(f"Model input shape: {input_shape}")
-
-        # Load and prepare image
-        img = Image.open(image_path).convert("RGB")
-        original_width, original_height = img.size
-        print(f"Original image dimensions: {original_width}x{original_height}")
+        # Get original file size
+        original_size = image_path.stat().st_size
         
-        # Calculate expected output size
-        expected_output_width = original_width * scale_factor
-        expected_output_height = original_height * scale_factor
-        expected_memory_mb = (expected_output_width * expected_output_height * 3 * 4) / (1024 * 1024)
+        # Compress image
+        compressed_img, fmt, save_params = compress_image(
+            image_path, quality, output_format, max_size
+        )
         
-        print(f"Expected output dimensions: {expected_output_width}x{expected_output_height}")
-        print(f"Expected memory usage: {expected_memory_mb:.1f} MB")
+        if compressed_img is None:
+            return None
         
-        # If image is too large, use tiling
-        max_memory_mb = 100  # Limit to 100MB to be safe
-        use_tiling = expected_memory_mb > max_memory_mb
+        # Calculate compressed size by saving to memory buffer
+        with io.BytesIO() as buffer:
+            compressed_img.save(buffer, format=fmt, **save_params)
+            compressed_size = buffer.tell()
         
-        if use_tiling:
-            print(f"Image too large ({expected_memory_mb:.1f}MB), using tiling...")
-            return upscale_image_tiled(img, session, input_name, output_name, scale_factor, progress_callback)
+        # Calculate compression metrics
+        if original_size > 0:
+            compression_ratio = ((original_size - compressed_size) / original_size) * 100
+            size_ratio = compressed_size / original_size
         else:
-            return upscale_image_direct(img, session, input_name, output_name, scale_factor, progress_callback)
+            compression_ratio = 0
+            size_ratio = 1
+        
+        return {
+            'original_size': original_size,
+            'compressed_size': compressed_size,
+            'compression_ratio': max(0, compression_ratio),  # Ensure non-negative
+            'size_ratio': size_ratio,
+            'format': fmt,
+            'quality': quality,
+            'dimensions': compressed_img.size,
+            'original_dimensions': None  # Will be filled by caller if needed
+        }
         
     except Exception as e:
-        print(f"Error during upscaling: {e}")
-        import traceback
-        traceback.print_exc()
+        compression_log.error(f"Compression preview failed for {Path(image_path).name}: {e}")
         return None
 
-def upscale_image_direct(img, session, input_name, output_name, scale_factor, progress_callback=None):
-    """Direct upscaling without tiling"""
+
+def save_compressed_image(image_path, output_path, quality=85, output_format=None, max_size=None, progress_callback=None):
+    """
+    Compress and save an image to specified path.
+    
+    Args:
+        image_path: Path to input image
+        output_path: Path to save compressed image
+        quality: Compression quality (1-100)
+        output_format: Output format
+        max_size: Optional resize dimensions
+        progress_callback: Optional progress callback function
+    
+    Returns:
+        True if successful, False otherwise
+    """
     try:
-        original_width, original_height = img.size
+        output_path = Path(output_path)
         
-        # Ensure image dimensions are multiples of scale_factor
-        width, height = img.size
+        # Ensure output directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Calculate padding needed
-        pad_width = (scale_factor - (width % scale_factor)) % scale_factor
-        pad_height = (scale_factor - (height % scale_factor)) % scale_factor
+        # Get compressed image data
+        compressed_img, fmt, save_params = compress_image(
+            image_path, quality, output_format, max_size, progress_callback
+        )
         
-        print(f"Padding needed: {pad_width}x{pad_height}")
-
-        if pad_width > 0 or pad_height > 0:
-            # Create padded image
-            padded_img = Image.new('RGB', (width + pad_width, height + pad_height), (0, 0, 0))
-            padded_img.paste(img, (0, 0))
-            img = padded_img
-            print(f"Padded image dimensions: {img.size}")
-
-        if progress_callback:
-            progress_callback(20)
-
-        # Convert to numpy array and normalize
-        img_np = np.array(img).astype(np.float32) / 255.0
-        img_np = np.transpose(img_np, (2, 0, 1))  # HWC to CHW
-        img_np = np.expand_dims(img_np, axis=0)  # Add batch dimension
+        if compressed_img is None:
+            compression_log.error(f"Failed to compress image: {Path(image_path).name}")
+            return False
         
-        print(f"Input tensor shape: {img_np.shape}")
+        # Save compressed image
+        compressed_img.save(output_path, format=fmt, **save_params)
         
-        if progress_callback:
-            progress_callback(40)
-
-        # Run inference
-        try:
-            output = session.run([output_name], {input_name: img_np})[0]
-            print(f"Output tensor shape: {output.shape}")
-        except Exception as e:
-            print(f"Inference failed: {e}")
-            return None
-            
-        if progress_callback:
-            progress_callback(80)
-
-        # Post-process output
-        output = np.squeeze(output, axis=0)  # Remove batch dimension
-        output = np.transpose(output, (1, 2, 0))  # CHW to HWC
+        # Verify the file was saved successfully
+        if output_path.exists() and output_path.stat().st_size > 0:
+            compression_log.info(f"Compressed image saved successfully: {output_path.name} ({output_path.stat().st_size} bytes)")
+            return True
+        else:
+            compression_log.error(f"Failed to save compressed image or file is empty: {output_path}")
+            return False
         
-        # Process in chunks to avoid memory issues
-        try:
-            output = np.clip(output * 255.0, 0, 255).astype(np.uint8)
-        except Exception as e:
-            print(f"Memory error during post-processing: {e}")
-            print("Trying chunk-wise processing...")
-            # Process in horizontal chunks
-            chunk_size = 500  # Smaller chunks for better memory management
-            processed_chunks = []
-            try:
-                for i in range(0, output.shape[0], chunk_size):
-                    chunk = output[i:i+chunk_size]
-                    chunk = np.clip(chunk * 255.0, 0, 255).astype(np.uint8)
-                    processed_chunks.append(chunk)
-                output = np.concatenate(processed_chunks, axis=0)
-            except Exception as chunk_error:
-                print(f"Chunk processing also failed: {chunk_error}")
-                return None
-        
-        upscaled_img = Image.fromarray(output)
-        print(f"Upscaled image dimensions: {upscaled_img.size}")
-
-        # Crop back to the expected dimensions (remove padding effects)
-        expected_width = original_width * scale_factor
-        expected_height = original_height * scale_factor
-        
-        print(f"Expected final dimensions: {expected_width}x{expected_height}")
-        
-        if upscaled_img.size[0] >= expected_width and upscaled_img.size[1] >= expected_height:
-            upscaled_img = upscaled_img.crop((0, 0, expected_width, expected_height))
-            print(f"Final cropped dimensions: {upscaled_img.size}")
-
-        if progress_callback:
-            progress_callback(100)
-
-        return upscaled_img
-        
+    except (OSError, IOError) as e:
+        compression_log.error(f"I/O error saving compressed image to {output_path}: {e}")
+        return False
     except Exception as e:
-        print(f"Error during direct upscaling: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def upscale_image_tiled(img, session, input_name, output_name, scale_factor, progress_callback=None):
-    """Upscale image using tiling to reduce memory usage"""
-    try:
-        original_width, original_height = img.size
-        tile_size = 512  # Process in 512x512 tiles
-        overlap = 64     # Overlap between tiles to avoid seams
-        
-        print(f"Using tiling with tile size: {tile_size}x{tile_size}, overlap: {overlap}")
-        
-        # Calculate number of tiles
-        tiles_x = (original_width + tile_size - 1) // tile_size
-        tiles_y = (original_height + tile_size - 1) // tile_size
-        total_tiles = tiles_x * tiles_y
-        
-        print(f"Processing {total_tiles} tiles ({tiles_x}x{tiles_y})")
-        
-        # Create output image
-        output_width = original_width * scale_factor
-        output_height = original_height * scale_factor
-        output_img = Image.new('RGB', (output_width, output_height))
-        
-        tile_count = 0
-        
-        for y in range(tiles_y):
-            for x in range(tiles_x):
-                # Calculate tile boundaries
-                x_start = x * tile_size
-                y_start = y * tile_size
-                x_end = min(x_start + tile_size, original_width)
-                y_end = min(y_start + tile_size, original_height)
-                
-                # Extract tile with overlap
-                tile_x_start = max(0, x_start - overlap)
-                tile_y_start = max(0, y_start - overlap)
-                tile_x_end = min(original_width, x_end + overlap)
-                tile_y_end = min(original_height, y_end + overlap)
-                
-                tile = img.crop((tile_x_start, tile_y_start, tile_x_end, tile_y_end))
-                
-                # Pad tile if necessary
-                tile_width, tile_height = tile.size
-                pad_width = (scale_factor - (tile_width % scale_factor)) % scale_factor
-                pad_height = (scale_factor - (tile_height % scale_factor)) % scale_factor
-                
-                if pad_width > 0 or pad_height > 0:
-                    padded_tile = Image.new('RGB', (tile_width + pad_width, tile_height + pad_height), (0, 0, 0))
-                    padded_tile.paste(tile, (0, 0))
-                    tile = padded_tile
-                
-                # Process tile
-                tile_np = np.array(tile).astype(np.float32) / 255.0
-                tile_np = np.transpose(tile_np, (2, 0, 1))
-                tile_np = np.expand_dims(tile_np, axis=0)
-                
-                try:
-                    tile_output = session.run([output_name], {input_name: tile_np})[0]
-                    
-                    # Post-process tile
-                    tile_output = np.squeeze(tile_output, axis=0)
-                    tile_output = np.transpose(tile_output, (1, 2, 0))
-                    tile_output = np.clip(tile_output * 255.0, 0, 255).astype(np.uint8)
-                    
-                    upscaled_tile = Image.fromarray(tile_output)
-                    
-                    # Calculate where to paste in output image
-                    output_x_start = x_start * scale_factor
-                    output_y_start = y_start * scale_factor
-                    output_x_end = x_end * scale_factor
-                    output_y_end = y_end * scale_factor
-                    
-                    # Calculate crop area from upscaled tile (remove overlap)
-                    crop_x_start = (x_start - tile_x_start) * scale_factor
-                    crop_y_start = (y_start - tile_y_start) * scale_factor
-                    crop_x_end = crop_x_start + (output_x_end - output_x_start)
-                    crop_y_end = crop_y_start + (output_y_end - output_y_start)
-                    
-                    cropped_tile = upscaled_tile.crop((crop_x_start, crop_y_start, crop_x_end, crop_y_end))
-                    
-                    # Paste into output image
-                    output_img.paste(cropped_tile, (output_x_start, output_y_start))
-                    
-                except Exception as e:
-                    print(f"Error processing tile {tile_count}: {e}")
-                    continue
-                
-                tile_count += 1
-                
-                # Update progress
-                if progress_callback:
-                    progress = int(20 + (tile_count / total_tiles) * 80)
-                    progress_callback(progress)
-        
-        if progress_callback:
-            progress_callback(100)
-        
-        print(f"Tiled upscaling completed. Final size: {output_img.size}")
-        return output_img
-        
-    except Exception as e:
-        print(f"Error during tiled upscaling: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def get_image_metadata_for_folder(folder_name="", recursive=False):
-    """
-    Retrieves image metadata for a specific folder or all images.
-    If recursive is True, includes images from subfolders.
-    """
-    all_metadata = load_metadata()
-    filtered_metadata = {}
-
-    if folder_name == "": # "All" category
-        if recursive:
-            return all_metadata # Return all metadata if recursive is true for "All"
-        else: # Non-recursive "All" (should not happen with current logic, but for completeness)
-            for image_id, item_data in all_metadata.items():
-                item_subfolder = item_data.get("subfolder", "")
-                if '/' not in item_subfolder and '\\' not in item_subfolder: # Only top-level images
-                    filtered_metadata[image_id] = item_data
-            return filtered_metadata
-    else: # Specific folder
-        target_folder_path = Path(folder_name).as_posix()
-        for image_id, item_data in all_metadata.items():
-            item_subfolder = Path(item_data.get("subfolder", "")).as_posix()
-            if recursive:
-                if item_subfolder == target_folder_path or item_subfolder.startswith(f"{target_folder_path}/"):
-                    filtered_metadata[image_id] = item_data
-            else:
-                if item_subfolder == target_folder_path:
-                    filtered_metadata[image_id] = item_data
-        return filtered_metadata
-
-def get_available_upscale_models():
-    """
-    Lists available ONNX upscale models in the 'models' directory.
-    Returns a list of (model_name, file_path) tuples.
-    """
-    models_dir = ROOT_DIR / "models"
-    available_models = []
-    if models_dir.exists() and models_dir.is_dir():
-        for file in models_dir.iterdir():
-            if file.suffix == ".onnx":
-                available_models.append((file.stem, str(file)))
-    return available_models
-
-def remove_image_files(image_id):
-
-    """Deletes the main image and its thumbnail file from the library and removes metadata."""
-    metadata = load_metadata()
-    if image_id in metadata:
-        item_data = metadata[image_id]
-        Path(item_data["library_path"]).unlink(missing_ok=True)
-        Path(item_data["thumbnail_path"]).unlink(missing_ok=True)
-        del metadata[image_id]
-        save_metadata(metadata)
-    else:
-        print(f"Warning: Image ID {image_id} not found in metadata.")
-
+        compression_log.error(f"Unexpected error saving compressed image to {output_path}: {e}")
+        return False

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f0f0f0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- 左侧面板 -->
+  <rect x="3" y="4" width="7" height="16" rx="1"/>
+  <!-- 右侧面板 -->
+  <rect x="12" y="4" width="9" height="16" rx="1"/>
+  <!-- 缩略图网格 -->
+  <rect x="4" y="6" width="2" height="2" rx="0.5"/>
+  <rect x="7" y="6" width="2" height="2" rx="0.5"/>
+  <rect x="4" y="9" width="2" height="2" rx="0.5"/>
+  <rect x="7" y="9" width="2" height="2" rx="0.5"/>
+</svg>

@@ -29,6 +29,11 @@ ICONS = {
     "upscale": QIcon(str(ICONS_DIR / "upscale.svg")),
     "arrow-left": QIcon(str(ICONS_DIR / "arrow-left.svg")),
     "arrow-right": QIcon(str(ICONS_DIR / "arrow-right.svg")),
+    "panel-show": QIcon(str(ICONS_DIR / "panel-show.svg")),
+    "panel-hide": QIcon(str(ICONS_DIR / "panel-hide.svg")),
+    "fullscreen": QIcon(str(ICONS_DIR / "fullscreen.svg")),
+    "info": QIcon(str(ICONS_DIR / "info.svg")),
+    "compress": QIcon(str(ICONS_DIR / "compress.svg")),
 }
 
 # --- Stylesheet ---
@@ -110,6 +115,35 @@ QToolBar QToolButton:pressed {
 QStatusBar {
     background-color: #34495e;
     color: #bdc3c7;
+}
+
+QProgressBar {
+    border: 1px solid #4e6a85;
+    border-radius: 6px;
+    text-align: center;
+    background-color: #2c3e50;
+    color: #ecf0f1;
+    font-weight: 600;
+    min-height: 20px;
+    max-height: 20px;
+}
+
+QProgressBar::chunk {
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                                stop: 0 #3498db, stop: 0.5 #2980b9, stop: 1 #3498db);
+    border-radius: 5px;
+    margin: 1px;
+}
+
+QProgressBar::chunk:indeterminate {
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                                stop: 0 #e74c3c, stop: 0.3 #f39c12, stop: 0.6 #f1c40f, stop: 1 #e74c3c);
+}
+
+QProgressBar:disabled {
+    color: #7f8c8d;
+    background-color: #34495e;
+    border: 1px solid #5d6d7e;
 }
 
 QScrollBar:vertical {
