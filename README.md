@@ -2,7 +2,7 @@
 
 > 一个功能强大的现代化图片查看应用程序，基于 PySide6 构建，集成 AI 图片超分辨率功能
 
-![Python](https://img.shields.io/badge/python-3.12-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![PySide6](https://img.shields.io/badge/PySide6-6.9+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
@@ -28,7 +28,7 @@
 
 ### 📋 系统要求
 
-- **Python**: 3.12 (严格要求)
+- **Python**: 3.9+ (推荐 3.11 或 3.12)
 - **显卡**: 支持 CUDA 12.1 的 NVIDIA 显卡 (AI 功能)
 - **内存**: 建议 8GB 以上 (处理大图片)
 - **存储**: 至少 5GB 可用空间 (包含 AI 模型)
