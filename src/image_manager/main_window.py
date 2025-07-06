@@ -23,18 +23,18 @@ class LogEmitter(logging.Handler, QThread):
     def __init__(self):
         super().__init__()
         QThread.__init__(self)
-        self.setFormatter(logging.Formatter('%(message)s')) # Only care about the message
+        self.setFormatter(logging.Formatter('%(message)s'))
 
     def emit(self, record):
         msg = self.format(record)
         self.log_signal.emit(msg)
 
 class UpscaleThread(QThread):
-    finished = Signal(object, str) # Signal to emit when upscaling is done (upscaled_pil_image, original_path_str)
-    error = Signal(str) # Signal to emit on error
-    progress = Signal(str) # Signal to emit progress messages
-    upscale_progress = Signal(int) # Signal for progress bar (0-100)
-    status_update = Signal(str) # Signal for status updates
+    finished = Signal(object, str)
+    error = Signal(str)
+    progress = Signal(str)
+    upscale_progress = Signal(int)
+    status_update = Signal(str)
 
     def __init__(self, image_path, model_path, max_output_size=None, parent=None):
         super().__init__(parent)
@@ -47,13 +47,11 @@ class UpscaleThread(QThread):
             self.status_update.emit("Starting image upscaling...")
             self.progress.emit("Upscaling image... This may take a while.")
             
-            # Custom progress callback that emits both signals
             def progress_callback(value):
                 self.upscale_progress.emit(value)
                 if value == 100:
                     self.status_update.emit("Upscaling completed!")
                 
-            # Scale factor will be auto-detected from model name
             upscaled_pil_image = image_utils.upscale_image(
                 self.image_path, 
                 self.model_path, 
@@ -77,34 +75,30 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Image Manager")
-        self.resize(1000, 700)  # Reduced from 1400x900 to 1000x700
+        self.resize(1000, 700)
         self.setMinimumSize(800, 600)
         self.setAcceptDrops(True)
         
-        # Track upscaling status
         self.is_upscaling = False
         self.upscale_thread = None
-        self.upscale_completed_recently = False  # Track if upscaling just completed
-        self.upscale_start_time = None  # Track start time for duration calculation
-        self.has_tiles = False  # Track if current upscaling uses tiling
+        self.upscale_completed_recently = False
+        self.upscale_start_time = None
+        self.has_tiles = False
         
-        # UI state
-        self.left_panel_visible = True  # 左侧面板是否可见
-        self.image_details_visible = True  # 图片详细信息是否可见
+        self.left_panel_visible = True
+        self.image_details_visible = True
 
         self.setup_ui()
         self.setup_connections()
         self.load_thumbnails()
-        self.load_upscale_models() # Load upscale models on startup
+        self.load_upscale_models()
 
-        # Setup logging for RealESRGAN progress
         self.log_emitter = LogEmitter()
         self.log_emitter.log_signal.connect(self.handle_log_message)
         logging.getLogger().addHandler(self.log_emitter)
-        logging.getLogger().setLevel(logging.INFO) # Ensure INFO level messages are captured
+        logging.getLogger().setLevel(logging.INFO)
 
     def setup_ui(self):
-        # --- Menu Bar ---
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         self.import_action = QAction(ICONS["import"], "Import Images...", self)
@@ -112,18 +106,23 @@ class MainWindow(QMainWindow):
         self.import_folder_action = QAction(ICONS["import"], "Import Folder...", self)
         file_menu.addAction(self.import_folder_action)
 
-        self.new_category_action = QAction(ICONS["add"], "New Category...", self) # New action for creating category
+        self.new_category_action = QAction(ICONS["add"], "New Category...", self)
         file_menu.addAction(self.new_category_action)
+        
+        file_menu.addSeparator()
+        
+        self.save_as_action = QAction("另存为...", self)
+        self.save_as_action.setShortcut("Ctrl+S")
+        self.save_as_action.triggered.connect(self.save_current_image_as)
+        file_menu.addAction(self.save_as_action)
 
-        # --- Main Widget and Layout ---
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
         main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(8, 8, 8, 8) # Add some margin around the main layout
-        main_layout.setSpacing(8) # Add spacing between widgets
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
 
-        # --- Left Panel (Category Buttons and Thumbnail Gallery) ---
         self.left_panel_widget = QWidget()
         left_panel_layout = QVBoxLayout(self.left_panel_widget)
         left_panel_layout.setContentsMargins(0, 0, 0, 0)
@@ -131,34 +130,28 @@ class MainWindow(QMainWindow):
 
         self.thumbnail_gallery = ThumbnailGallery()
         left_panel_layout.addWidget(self.thumbnail_gallery)
-        # Set size constraints for left panel
-        self.left_panel_widget.setFixedWidth(330) # Fixed width for two columns (2 * 138 + 2 * 9 for layout margins)
-        self.left_panel_widget.setMinimumHeight(400) # Ensure minimum height
+        self.left_panel_widget.setFixedWidth(330)
+        self.left_panel_widget.setMinimumHeight(400)
         main_layout.addWidget(self.left_panel_widget)
 
-        # --- Right Panel (Image Viewer and Details) ---
-        right_panel_widget = QWidget() # Create a widget to hold the right panel layout
+        right_panel_widget = QWidget()
         right_panel_layout = QVBoxLayout(right_panel_widget)
-        right_panel_layout.setContentsMargins(8, 8, 8, 8) # Add some margin inside the right panel
-        right_panel_layout.setSpacing(8) # Add spacing between widgets
+        right_panel_layout.setContentsMargins(8, 8, 8, 8)
+        right_panel_layout.setSpacing(8)
         
-        # Set size constraints for right panel
-        right_panel_widget.setMinimumWidth(400) # Ensure minimum width
-        right_panel_widget.setMinimumHeight(400) # Ensure minimum height
+        right_panel_widget.setMinimumWidth(400)
+        right_panel_widget.setMinimumHeight(400)
 
         self.image_viewer = ImageViewer()
         right_panel_layout.addWidget(self.image_viewer, stretch=1)
 
-        # --- View Menu (after image_viewer is created) ---
         view_menu = menu_bar.addMenu("&View")
         
-        # 创建切换面板的Action
         self.toggle_panel_action = QAction(ICONS["panel-hide"], "Hide Sidebar", self)
         self.toggle_panel_action.setShortcut("F9")
         self.toggle_panel_action.triggered.connect(self.toggle_left_panel)
         view_menu.addAction(self.toggle_panel_action)
         
-        # 创建切换图片详细信息的Action
         self.toggle_info_action = QAction(ICONS["info"], "Hide Image Details", self)
         self.toggle_info_action.setShortcut("F10")
         self.toggle_info_action.triggered.connect(self.toggle_image_details)
@@ -167,19 +160,15 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.image_viewer.fullscreen_action)
         
-        # 将Action添加到主窗口以确保快捷键工作
         self.addAction(self.toggle_panel_action)
         self.addAction(self.toggle_info_action)
         self.addAction(self.image_viewer.fullscreen_action)
 
-        # Image details label with size constraints
         self.image_details_label = QLabel("Image details will be shown here.")
         self.image_details_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.image_details_label.setWordWrap(True)
-        # Set maximum height to prevent the label from pushing the status bar off-screen
         self.image_details_label.setMaximumHeight(120)
         self.image_details_label.setMinimumHeight(80)
-        # Add scroll area capability for long text
         self.image_details_label.setStyleSheet("""
             QLabel {
                 background-color: #34495e;
@@ -191,28 +180,23 @@ class MainWindow(QMainWindow):
         """)
         right_panel_layout.addWidget(self.image_details_label)
         
-        main_layout.addWidget(right_panel_widget, stretch=1) # Add the right panel widget to the main layout, stretching to fill space
+        main_layout.addWidget(right_panel_widget, stretch=1)
 
-        # --- Toolbar ---
         toolbar = self.addToolBar("Main Toolbar")
         
-        # 视图控制
         toolbar.addAction(self.toggle_panel_action)
         toolbar.addAction(self.toggle_info_action)
         toolbar.addSeparator()
         
-        # 文件操作
         toolbar.addAction(self.import_action)
         toolbar.addAction(self.import_folder_action)
-        toolbar.addAction(self.new_category_action) # Add new category action to toolbar
+        toolbar.addAction(self.new_category_action)
         toolbar.addSeparator()
         
-        # Upscale Model Selection
         self.upscale_model_combo = QComboBox(self)
         self.upscale_model_combo.setToolTip("Select RealESRGAN model (scale factor auto-detected)")
         toolbar.addWidget(self.upscale_model_combo)
         
-        # Output Size Limit Selection
         self.output_size_combo = QComboBox(self)
         self.output_size_combo.setToolTip("Limit output resolution for better performance")
         self.output_size_combo.addItem("No Limit", None)
@@ -220,13 +204,13 @@ class MainWindow(QMainWindow):
         self.output_size_combo.addItem("2K (2560x1440)", (2560, 1440))
         self.output_size_combo.addItem("1080p (1920x1080)", (1920, 1080))
         self.output_size_combo.addItem("720p (1280x720)", (1280, 720))
-        self.output_size_combo.setCurrentIndex(1)  # Default to 4K
+        self.output_size_combo.setCurrentIndex(1)
         toolbar.addWidget(self.output_size_combo)
 
-        self.upscale_action = QAction(ICONS["upscale"], "Upscale Image", self) # New action for upscale
+        self.upscale_action = QAction(ICONS["upscale"], "Upscale Image", self)
         toolbar.addAction(self.upscale_action)
         
-        self.compress_action = QAction(ICONS["compress"], "Compress Image", self) # New action for compress
+        self.compress_action = QAction(ICONS["compress"], "Compress Image", self)
         toolbar.addAction(self.compress_action)
         toolbar.addSeparator()
 
@@ -237,26 +221,21 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.image_viewer.fullscreen_action)
 
-        # --- Status Bar ---
         self.status_bar = QStatusBar()
-        # Ensure status bar has minimum height and is always visible
         self.status_bar.setMinimumHeight(28)
         self.status_bar.setMaximumHeight(35)
-        self.status_bar.setSizeGripEnabled(True)  # Allow window resizing from status bar
+        self.status_bar.setSizeGripEnabled(True)
         
-        # Create a container widget for progress-related widgets
         self.progress_container = QWidget()
         progress_layout = QHBoxLayout(self.progress_container)
         progress_layout.setContentsMargins(8, 2, 8, 2)
         progress_layout.setSpacing(12)
         
-        # Add file name label for upscaling progress
         self.upscale_file_label = QLabel("")
         self.upscale_file_label.setStyleSheet("color: #3498db; font-weight: 600;")
         self.upscale_file_label.hide()
         progress_layout.addWidget(self.upscale_file_label)
         
-        # Add progress bar with improved sizing
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("%p%")
@@ -267,7 +246,6 @@ class MainWindow(QMainWindow):
         self.progress_bar.hide()
         progress_layout.addWidget(self.progress_bar)
 
-        # Add detailed progress label
         self.detailed_progress_label = QLabel("")
         self.detailed_progress_label.setStyleSheet("color: #95a5a6; font-style: italic;")
         self.detailed_progress_label.setMinimumWidth(150)
@@ -275,17 +253,13 @@ class MainWindow(QMainWindow):
         self.detailed_progress_label.hide()
         progress_layout.addWidget(self.detailed_progress_label)
         
-        # Add spacer to push progress widgets to the right
         progress_layout.addStretch()
         
-        # Set fixed minimum size for the container to maintain layout stability
         self.progress_container.setMinimumHeight(24)
         self.progress_container.setMaximumHeight(30)
         
-        # Add the progress container to status bar (always visible container)
         self.status_bar.addPermanentWidget(self.progress_container)
         
-        # Add a default status message
         self.status_bar.showMessage("Ready - Select an image to start")
         
         self.setStatusBar(self.status_bar)
@@ -297,37 +271,31 @@ class MainWindow(QMainWindow):
         self.thumbnail_gallery.status_message.connect(self.status_bar.showMessage)
         self.thumbnail_gallery.library_updated.connect(self.update_status_bar)
 
-        # Connect ImageViewer actions
         self.image_viewer.zoom_in_action.triggered.connect(self.image_viewer.zoom_in)
         self.image_viewer.zoom_out_action.triggered.connect(self.image_viewer.zoom_out)
         self.image_viewer.zoom_actual_action.triggered.connect(self.image_viewer.zoom_to_actual_size)
         self.image_viewer.fit_to_window_action.triggered.connect(self.image_viewer.fit_to_window)
         
-        # Connect navigation signals
         self.image_viewer.navigate_previous.connect(self.navigate_to_previous_image)
         self.image_viewer.navigate_next.connect(self.navigate_to_next_image)
 
-        self.new_category_action.triggered.connect(self.create_new_category_dialog) # Connect new action
-        self.upscale_action.triggered.connect(self.upscale_image_dialog) # Connect upscale action
-        self.compress_action.triggered.connect(self.compress_image_dialog) # Connect compress action
+        self.new_category_action.triggered.connect(self.create_new_category_dialog)
+        self.upscale_action.triggered.connect(self.upscale_image_dialog)
+        self.compress_action.triggered.connect(self.compress_image_dialog)
 
     def show_progress_widgets(self):
-        """显示进度相关的控件"""
         self.progress_bar.show()
         self.upscale_file_label.show()
         
     def hide_progress_widgets(self):
-        """隐藏进度相关的控件"""
         self.progress_bar.hide()
         self.upscale_file_label.hide()
         self.detailed_progress_label.hide()
 
     def on_status_update(self, status_message):
-        """处理状态更新信号"""
         self.status_bar.showMessage(status_message, 3000)
 
     def on_image_selected(self, image_data):
-        # Only reset progress bar if no upscaling is currently running AND not recently completed
         if not self.is_upscaling and not self.upscale_completed_recently:
             self.progress_bar.setValue(0)
             self.hide_progress_widgets()
@@ -335,26 +303,21 @@ class MainWindow(QMainWindow):
         if image_data:
             self.image_viewer.set_image(image_data["library_path"], image_data)
             
-            # 更新全屏图片查看器的导航状态
             self.update_fullscreen_navigation_state()
             
-            # Calculate image memory usage and additional info for display
             try:
                 from PIL import Image
                 import os
                 from datetime import datetime
                 
                 with Image.open(image_data["library_path"]) as img:
-                    memory_mb = (img.width * img.height * 4) / (1024 * 1024)  # 4 bytes per pixel (RGBA)
+                    memory_mb = (img.width * img.height * 4) / (1024 * 1024)
                     memory_info = f" (~{memory_mb:.0f}MB)"
                     
-                    # 获取图片格式
                     format_info = img.format if img.format else "Unknown"
                     
-                    # 获取颜色模式
                     mode_info = img.mode if img.mode else "Unknown"
                 
-                # 获取文件修改时间
                 try:
                     mod_time = os.path.getmtime(image_data["library_path"])
                     mod_date = datetime.fromtimestamp(mod_time).strftime("%Y-%m-%d %H:%M")
@@ -367,7 +330,6 @@ class MainWindow(QMainWindow):
                 mode_info = "Unknown"
                 mod_date = "Unknown"
             
-            # 计算纵横比
             try:
                 aspect_ratio = image_data['width'] / image_data['height']
                 if abs(aspect_ratio - 16/9) < 0.1:
@@ -392,14 +354,12 @@ class MainWindow(QMainWindow):
             )
             self.image_details_label.setText(details)
             
-            # Update status bar with image info
             if not self.is_upscaling and not self.upscale_completed_recently:
                 self.status_bar.showMessage(
                     f"Image loaded: {image_data['original_filename']} "
                     f"({image_data['width']}x{image_data['height']})"
                 )
             
-            # 更新导航按钮状态
             self.update_navigation_buttons_state()
         else:
             self.image_viewer.clear_image()
@@ -427,11 +387,9 @@ class MainWindow(QMainWindow):
 
     def load_thumbnails(self):
         self.thumbnail_gallery.load_thumbnails()
-        
         self.update_navigation_buttons_state()
 
     def update_status_bar(self):
-        # Show library update message and system memory info
         try:
             import psutil
             memory = psutil.virtual_memory()
@@ -450,7 +408,6 @@ class MainWindow(QMainWindow):
         urls = event.mimeData().urls()
         file_paths = [url.toLocalFile() for url in urls if url.isLocalFile() and url.toLocalFile().lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif'))]
         if file_paths:
-            # For drag and drop, import to current folder
             self.thumbnail_gallery.process_imported_paths(file_paths, self.thumbnail_gallery.current_folder)
 
     def create_new_category_dialog(self):
@@ -470,7 +427,7 @@ class MainWindow(QMainWindow):
             try:
                 new_category_path.mkdir(parents=True, exist_ok=True)
                 self.status_bar.showMessage(f"Category '{sanitized_name}' created.", 3000)
-                self.thumbnail_gallery.load_thumbnails(self.thumbnail_gallery.current_folder) # Reload categories
+                self.thumbnail_gallery.load_thumbnails(self.thumbnail_gallery.current_folder)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to create category: {e}")
 
@@ -486,30 +443,24 @@ class MainWindow(QMainWindow):
         for i, model_info in enumerate(available_models):
             model_name = model_info["name"]
             model_path = model_info["path"]
-            # Get scale factor from model name for display
             scale_factor = image_utils.get_model_scale_factor(model_path)
             display_name = f"{model_name} ({scale_factor}x)"
-            self.upscale_model_combo.addItem(display_name, model_path) # Store full path as user data
+            self.upscale_model_combo.addItem(display_name, model_path)
             
-            # Set default model to realesrgan-x4plus_anime_6B
             if "realesrgan-x4plus_anime_6b" in model_name.lower():
                 default_model_index = i
         
-        # Set default selection
         if default_model_index >= 0:
             self.upscale_model_combo.setCurrentIndex(default_model_index)
         
         self.upscale_action.setEnabled(True)
 
-
     def handle_log_message(self, message):
-        # Print log message to terminal for real-time feedback
         if "compression" in message.lower():
             print(f"Compression: {message}")
         else:
             print(f"Upscaling: {message}")
         
-        # Update progress bar based on log content - display English messages in GUI
         if "Starting PyTorch upscaling process" in message:
             self.upscale_start_time = time.time()
             self.has_tiles = False
@@ -580,7 +531,6 @@ class MainWindow(QMainWindow):
                 self.update_progress_smoothly(15)
                 self.detailed_progress_label.setText("Initializing upsampler (with tiling)")
         
-        # Handle tile processing messages
         match = re.search(r"Tile (\d+)/(\d+)", message)
         if match:
             current_tile = int(match.group(1))
@@ -595,7 +545,6 @@ class MainWindow(QMainWindow):
             
             self.update_progress_smoothly(int(overall_progress))
             
-            # Show ETA for tiles
             if self.upscale_start_time and current_tile > 1:
                 elapsed = time.time() - self.upscale_start_time
                 avg_time_per_tile = elapsed / (current_tile - 1)
@@ -611,24 +560,21 @@ class MainWindow(QMainWindow):
             
             self.detailed_progress_label.show()
         
-        # Force GUI update
         from PySide6.QtWidgets import QApplication
         QApplication.processEvents()
-
 
     def update_progress_smoothly(self, value):
         if self.progress_bar.isHidden():
             self.show_progress_widgets()
 
-        # Stop any existing animation
         if hasattr(self, 'progress_animation') and self.progress_animation.state() == QPropertyAnimation.Running:
             self.progress_animation.stop()
 
         self.progress_animation = QPropertyAnimation(self.progress_bar, b"value")
-        self.progress_animation.setDuration(250) # Animation duration in milliseconds
+        self.progress_animation.setDuration(250)
         self.progress_animation.setStartValue(self.progress_bar.value())
         self.progress_animation.setEndValue(value)
-        self.progress_animation.setEasingCurve(QEasingCurve.InOutQuad) # Smooth easing curve
+        self.progress_animation.setEasingCurve(QEasingCurve.InOutQuad)
         self.progress_animation.start()
 
     def upscale_image_dialog(self):
@@ -637,7 +583,6 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("No image selected for upscaling.", 3000)
             return
 
-        # Check if already upscaling
         if self.is_upscaling:
             self.status_bar.showMessage("Upscaling already in progress.", 3000)
             return
@@ -655,16 +600,13 @@ class MainWindow(QMainWindow):
             
             selected_model_path = self.upscale_model_combo.currentData()
             
-            # Get output size limit
             max_output_size = self.output_size_combo.currentData()
             
-            # Set upscaling status and clear completion flag
             self.is_upscaling = True
             self.upscale_completed_recently = False
             self.upscale_start_time = None
             self.has_tiles = False
             
-            # Stop any existing completion timer
             if hasattr(self, 'completion_timer') and self.completion_timer.isActive():
                 self.completion_timer.stop()
             
@@ -694,25 +636,17 @@ class MainWindow(QMainWindow):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(2000, self.hide_progress_widgets)
 
-    def on_status_update(self, status_message):
-        """处理状态更新信号"""
-        self.status_bar.showMessage(status_message, 3000)
-
     def on_upscale_finished(self, upscaled_pil_image, original_path_str):
-        # Reset upscaling status and set completed flag
         self.is_upscaling = False
         self.upscale_completed_recently = True
         
-        # Ensure progress bar reaches 100% and shows completion
         self.progress_bar.setValue(100)
         original_path = Path(original_path_str)
-        current_image_data = self.image_viewer.image_data # Get current image data
+        current_image_data = self.image_viewer.image_data
         
-        # Show completion with original filename from metadata
         original_filename = current_image_data.get("original_filename", original_path.name)
         self.upscale_file_label.setText(f"Completed: {original_filename}")
         
-        # Calculate and display total time
         if self.upscale_start_time:
             total_time = time.time() - self.upscale_start_time
             completion_msg = f"Image upscaling completed successfully in {total_time:.1f}s"
@@ -722,7 +656,6 @@ class MainWindow(QMainWindow):
         
         self.detailed_progress_label.show()
         
-        # Keep progress bar visible for 10 seconds
         from PySide6.QtCore import QTimer
         self.completion_timer = QTimer()
         self.completion_timer.timeout.connect(self.clear_completion_status)
@@ -730,16 +663,13 @@ class MainWindow(QMainWindow):
         self.completion_timer.start(10000)
 
         if upscaled_pil_image:
-            # Generate a new unique ID for the upscaled image
             image_id = str(uuid.uuid4())
             suffix = original_path.suffix.lower()
             
-            # Determine paths for the new upscaled image
             target_subfolder = current_image_data.get("subfolder", "")
             target_folder = LIBRARY_DIR / target_subfolder
-            target_folder.mkdir(parents=True, exist_ok=True) # Ensure subfolder exists
+            target_folder.mkdir(parents=True, exist_ok=True)
 
-            # Generate filename based on original image's original_filename
             original_filename = current_image_data.get("original_filename", original_path.name)
             original_stem = Path(original_filename).stem
             original_suffix = Path(original_filename).suffix
@@ -750,17 +680,14 @@ class MainWindow(QMainWindow):
             upscaled_library_path = target_folder / upscaled_file_name
             upscaled_thumbnail_path = THUMBNAIL_DIR / upscaled_thumbnail_name
 
-            # Save the upscaled image
             upscaled_pil_image.save(upscaled_library_path)
 
-            # Create thumbnail for the upscaled image
             upscaled_pil_image.thumbnail(THUMBNAIL_SIZE)
             upscaled_pil_image.save(upscaled_thumbnail_path)
 
-            # Update metadata
             metadata = image_utils.load_metadata()
             metadata[image_id] = {
-                "original_filename": upscaled_file_name,  # Use the actual generated filename
+                "original_filename": upscaled_file_name,
                 "library_path": str(upscaled_library_path),
                 "thumbnail_path": str(upscaled_thumbnail_path),
                 "width": upscaled_pil_image.width,
@@ -773,7 +700,6 @@ class MainWindow(QMainWindow):
 
             self.status_bar.showMessage("Image upscaled successfully!", 5000)
             
-            # Refresh thumbnail gallery after 3 seconds
             from PySide6.QtCore import QTimer
             QTimer.singleShot(3000, lambda: self.thumbnail_gallery.load_thumbnails(self.thumbnail_gallery.current_folder))
         else:
@@ -783,12 +709,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self.detailed_progress_label.hide)
 
     def clear_completion_status(self):
-        """清除完成状态并隐藏进度控件"""
         self.upscale_completed_recently = False
         self.hide_progress_widgets()
         
     def force_clear_progress(self):
-        """强制清除进度显示（用户手动操作）"""
         if hasattr(self, 'completion_timer') and self.completion_timer.isActive():
             self.completion_timer.stop()
         self.clear_completion_status()
@@ -800,7 +724,6 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.upscale_file_label.setText("Error")
         
-        # Show error message with timing if available
         if self.upscale_start_time:
             error_time = time.time() - self.upscale_start_time
             error_msg = f"Error after {error_time:.1f}s: {message}"
@@ -810,7 +733,6 @@ class MainWindow(QMainWindow):
         
         self.detailed_progress_label.show()
         
-        # Hide progress widgets after delay
         from PySide6.QtCore import QTimer
         QTimer.singleShot(2000, self.hide_progress_widgets)
         
@@ -818,7 +740,6 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Upscaling failed.", 3000)
 
     def compress_image_dialog(self):
-        """显示图片压缩对话框"""
         current_image_data = self.image_viewer.image_data
         if not current_image_data:
             self.status_bar.showMessage("No image selected for compression.", 3000)
@@ -830,7 +751,6 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # Show compression dialog
             dialog = CompressionDialog(str(original_path), self)
             if dialog.exec() == QDialog.Accepted:
                 settings = dialog.get_compression_settings()
@@ -841,13 +761,10 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Compression dialog error.", 3000)
 
     def perform_compression(self, original_path, current_image_data, settings):
-        """执行图片压缩"""
         try:
-            # Generate output filename
             original_filename = current_image_data.get("original_filename", original_path.name)
             original_stem = Path(original_filename).stem
             
-            # Determine output format and extension
             output_format = settings['output_format']
             if output_format == 'JPEG':
                 extension = '.jpg'
@@ -858,7 +775,6 @@ class MainWindow(QMainWindow):
             else:
                 extension = original_path.suffix
                 
-            # Create output filename
             target_subfolder = current_image_data.get("subfolder", "")
             target_folder = LIBRARY_DIR / target_subfolder
             target_folder.mkdir(parents=True, exist_ok=True)
@@ -867,12 +783,9 @@ class MainWindow(QMainWindow):
             compressed_filename = image_utils.get_unique_filename(target_folder, base_name, extension)
             compressed_path = target_folder / compressed_filename
             
-            # Show progress
             self.status_bar.showMessage("Compressing image...", 3000)
             
-            # Perform compression
             def progress_callback(value):
-                # Could add progress bar here if needed
                 pass
                 
             success = image_utils.save_compressed_image(
@@ -885,7 +798,6 @@ class MainWindow(QMainWindow):
             )
             
             if success:
-                # Add compressed image to library
                 compressed_item = image_utils.add_image_to_library(
                     str(compressed_path), 
                     target_subfolder
@@ -897,7 +809,6 @@ class MainWindow(QMainWindow):
                         5000
                     )
                     
-                    # Refresh thumbnail gallery
                     QTimer.singleShot(1000, 
                         lambda: self.thumbnail_gallery.load_thumbnails(self.thumbnail_gallery.current_folder)
                     )
@@ -905,7 +816,6 @@ class MainWindow(QMainWindow):
                     self.status_bar.showMessage("Compression completed but failed to add to library.", 3000)
             else:
                 self.status_bar.showMessage("Image compression failed.", 3000)
-                # Clean up failed compression file
                 if compressed_path.exists():
                     compressed_path.unlink()
                     
@@ -914,7 +824,6 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Compression failed.", 3000)
 
     def get_current_image_index(self):
-        """获取当前显示图片在图片列表中的索引"""
         if not self.image_viewer.image_data:
             return -1
             
@@ -927,7 +836,6 @@ class MainWindow(QMainWindow):
         return -1
         
     def navigate_to_previous_image(self):
-        """导航到上一张图片"""
         current_index = self.get_current_image_index()
         if current_index > 0:
             image_list = self.thumbnail_gallery.get_current_image_list()
@@ -935,7 +843,6 @@ class MainWindow(QMainWindow):
             self.thumbnail_gallery.select_image_by_data(prev_image)
             
     def navigate_to_next_image(self):
-        """导航到下一张图片"""
         current_index = self.get_current_image_index()
         image_list = self.thumbnail_gallery.get_current_image_list()
         if current_index < len(image_list) - 1:
@@ -943,7 +850,6 @@ class MainWindow(QMainWindow):
             self.thumbnail_gallery.select_image_by_data(next_image)
             
     def update_navigation_buttons_state(self):
-        """更新导航按钮的启用状态"""
         current_index = self.get_current_image_index()
         image_list = self.thumbnail_gallery.get_current_image_list()
         
@@ -957,64 +863,57 @@ class MainWindow(QMainWindow):
         self.image_viewer.set_navigation_enabled(prev_enabled, next_enabled)
         
     def update_fullscreen_navigation_state(self):
-        """更新全屏导航状态（别名方法）"""
         self.update_navigation_buttons_state()
         
     def toggle_left_panel(self):
-        """切换左侧面板的显示/隐藏"""
         if self.left_panel_visible:
-            # 隐藏左侧面板
             self.left_panel_widget.hide()
             self.left_panel_visible = False
             self.toggle_panel_action.setIcon(ICONS["panel-show"])
             self.toggle_panel_action.setText("Show Sidebar")
         else:
-            # 显示左侧面板
             self.left_panel_widget.show()
             self.left_panel_visible = True
             self.toggle_panel_action.setIcon(ICONS["panel-hide"])
             self.toggle_panel_action.setText("Hide Sidebar")
             
     def toggle_image_details(self):
-        """切换图片详细信息的显示/隐藏"""
         if self.image_details_visible:
-            # 隐藏图片详细信息
             self.image_details_label.hide()
             self.image_details_visible = False
             self.toggle_info_action.setText("Show Image Details")
         else:
-            # 显示图片详细信息
             self.image_details_label.show()
             self.image_details_visible = True
             self.toggle_info_action.setText("Hide Image Details")
 
     def keyPressEvent(self, event):
-        """处理键盘事件"""
         if event.key() == Qt.Key_Escape and self.isFullScreen():
-            # ESC键退出全屏
             self.showNormal()
         elif event.key() == Qt.Key_Left:
             self.navigate_to_previous_image()
         elif event.key() == Qt.Key_Right:
             self.navigate_to_next_image()
         elif event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier:
-            
             self.image_viewer.toggle_navigation_zone_debug()
             debug_status = "ON" if getattr(self.image_viewer, 'show_nav_zones', False) else "OFF"
             self.status_bar.showMessage(f"Navigation zone debug mode: {debug_status}", 3000)
         else:
             super().keyPressEvent(event)
+            
+    def save_current_image_as(self):
+        if hasattr(self.image_viewer, 'save_image_as'):
+            self.image_viewer.save_image_as()
+        else:
+            QMessageBox.information(self, "提示", "当前没有选中的图片")
 
     def resizeEvent(self, event):
-        """处理窗口大小变化事件，确保状态栏始终可见"""
         super().resizeEvent(event)
         
-        # Ensure minimum window height to keep status bar visible
-        min_height = 600  # Minimum height to show all UI elements
+        min_height = 600
         if self.height() < min_height:
             self.resize(self.width(), min_height)
         
-        # Ensure minimum window width
         min_width = 800
         if self.width() < min_width:
             self.resize(min_width, self.height())

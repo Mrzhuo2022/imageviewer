@@ -7,9 +7,7 @@ from pathlib import Path
 from PIL import Image
 from .. import image_utils
 
-
 class PreviewWorker(QThread):
-    """Background thread for calculating compression preview."""
     preview_ready = Signal(dict)
     preview_error = Signal(str)
     
@@ -32,7 +30,6 @@ class PreviewWorker(QThread):
         except Exception as e:
             self.preview_error.emit(str(e))
 
-
 class CompressionDialog(QDialog):
     def __init__(self, image_path, parent=None):
         super().__init__(parent)
@@ -42,7 +39,6 @@ class CompressionDialog(QDialog):
         self.preview_worker = None
         self.original_info = self._get_original_image_info()
         
-        # Timer for debounced preview updates
         self.preview_timer = QTimer()
         self.preview_timer.setSingleShot(True)
         self.preview_timer.timeout.connect(self.update_preview)
@@ -56,11 +52,9 @@ class CompressionDialog(QDialog):
         self.connect_signals()
         self.load_image_info()
         
-        # Initial preview after a short delay
         QTimer.singleShot(200, self.update_preview)
     
     def _get_original_image_info(self):
-        """Get original image information."""
         try:
             with Image.open(self.image_path) as img:
                 return {
@@ -81,7 +75,6 @@ class CompressionDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         
-        # Image info section
         info_group = QGroupBox("Image Information")
         info_layout = QVBoxLayout(info_group)
         
@@ -95,11 +88,9 @@ class CompressionDialog(QDialog):
         
         layout.addWidget(info_group)
         
-        # Compression settings section
         settings_group = QGroupBox("Compression Settings")
         settings_layout = QVBoxLayout(settings_group)
         
-        # Format selection
         format_layout = QHBoxLayout()
         format_layout.addWidget(QLabel("Output Format:"))
         self.format_combo = QComboBox()
@@ -107,12 +98,11 @@ class CompressionDialog(QDialog):
         self.format_combo.addItem("JPEG", "JPEG")
         self.format_combo.addItem("PNG", "PNG")  
         self.format_combo.addItem("WebP", "WEBP")
-        self.format_combo.setCurrentIndex(1)  # Default to JPEG
+        self.format_combo.setCurrentIndex(1)
         format_layout.addWidget(self.format_combo)
         format_layout.addStretch()
         settings_layout.addLayout(format_layout)
         
-        # Quality slider with better layout
         quality_group = QGroupBox("Quality")
         quality_layout = QVBoxLayout(quality_group)
         
@@ -131,7 +121,6 @@ class CompressionDialog(QDialog):
         self.quality_slider.setTickInterval(25)
         quality_layout.addWidget(self.quality_slider)
         
-        # Quality presets in a better layout
         preset_layout = QHBoxLayout()
         self.low_quality_btn = QPushButton("Low (30)")
         self.medium_quality_btn = QPushButton("Medium (70)")
@@ -146,7 +135,6 @@ class CompressionDialog(QDialog):
         quality_layout.addLayout(preset_layout)
         settings_layout.addWidget(quality_group)
         
-        # Resize options
         resize_group = QGroupBox("Resize Options")
         resize_layout = QVBoxLayout(resize_group)
         
@@ -171,7 +159,6 @@ class CompressionDialog(QDialog):
         size_layout.addWidget(self.height_spinbox)
         resize_layout.addLayout(size_layout)
         
-        # Size presets
         size_preset_layout = QHBoxLayout()
         self.size_4k_btn = QPushButton("4K")
         self.size_1080p_btn = QPushButton("1080p")
@@ -190,7 +177,6 @@ class CompressionDialog(QDialog):
         
         layout.addWidget(settings_group)
         
-        # Preview section with better styling
         preview_group = QGroupBox("Compression Preview")
         preview_layout = QVBoxLayout(preview_group)
         
@@ -209,15 +195,13 @@ class CompressionDialog(QDialog):
         """)
         preview_layout.addWidget(self.preview_label)
         
-        # Progress bar for preview calculation
         self.preview_progress = QProgressBar()
-        self.preview_progress.setRange(0, 0)  # Indeterminate
+        self.preview_progress.setRange(0, 0)
         self.preview_progress.hide()
         preview_layout.addWidget(self.preview_progress)
         
         layout.addWidget(preview_group)
         
-        # Button layout
         button_layout = QHBoxLayout()
         self.compress_btn = QPushButton("Compress && Save")
         self.compress_btn.setDefault(True)
@@ -232,31 +216,26 @@ class CompressionDialog(QDialog):
         layout.addLayout(button_layout)
     
     def connect_signals(self):
-        # Quality controls
         self.quality_slider.valueChanged.connect(self.on_quality_changed)
         self.low_quality_btn.clicked.connect(lambda: self.set_quality(30))
         self.medium_quality_btn.clicked.connect(lambda: self.set_quality(70))
         self.high_quality_btn.clicked.connect(lambda: self.set_quality(85))
         self.max_quality_btn.clicked.connect(lambda: self.set_quality(95))
         
-        # Format and resize controls
         self.format_combo.currentTextChanged.connect(self.on_settings_changed)
         self.resize_checkbox.toggled.connect(self.on_resize_toggled)
         self.width_spinbox.valueChanged.connect(self.on_settings_changed)
         self.height_spinbox.valueChanged.connect(self.on_settings_changed)
         
-        # Size presets
         self.size_4k_btn.clicked.connect(lambda: self.set_size(3840, 2160))
         self.size_1080p_btn.clicked.connect(lambda: self.set_size(1920, 1080))
         self.size_720p_btn.clicked.connect(lambda: self.set_size(1280, 720))
         self.size_480p_btn.clicked.connect(lambda: self.set_size(854, 480))
         
-        # Dialog buttons
         self.compress_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
     
     def load_image_info(self):
-        """Load and display original image information."""
         info = self.original_info
         size_mb = info['size'] / (1024 * 1024)
         
@@ -290,15 +269,13 @@ Mode: {info['mode']}"""
         self.height_spinbox.setValue(height)
     
     def schedule_preview_update(self):
-        """Schedule preview update with debouncing."""
         if self.preview_worker and self.preview_worker.isRunning():
-            return  # Don't schedule if already calculating
+            return
             
         self.preview_timer.stop()
-        self.preview_timer.start(300)  # 300ms delay
+        self.preview_timer.start(300)
     
     def update_preview(self):
-        """Update compression preview in background thread."""
         if self.preview_worker and self.preview_worker.isRunning():
             return
             
@@ -306,7 +283,6 @@ Mode: {info['mode']}"""
             self.preview_progress.show()
             self.preview_label.setText("Calculating preview...")
             
-            # Get current settings
             quality = self.quality_slider.value()
             output_format = self.format_combo.currentData()
             max_size = None
@@ -314,7 +290,6 @@ Mode: {info['mode']}"""
             if self.resize_checkbox.isChecked():
                 max_size = (self.width_spinbox.value(), self.height_spinbox.value())
             
-            # Start background calculation
             self.preview_worker = PreviewWorker(self.image_path, quality, output_format, max_size)
             self.preview_worker.preview_ready.connect(self.on_preview_ready)
             self.preview_worker.preview_error.connect(self.on_preview_error)
@@ -325,43 +300,35 @@ Mode: {info['mode']}"""
             self.on_preview_error(f"Preview error: {str(e)}")
     
     def on_preview_ready(self, preview_info):
-        """Handle successful preview calculation."""
         self.preview_info = preview_info
         self.display_preview_info()
     
     def on_preview_error(self, error_msg):
-        """Handle preview calculation error."""
         self.preview_label.setText(f"Preview failed: {error_msg}")
         self.preview_label.setStyleSheet(self.preview_label.styleSheet() + "color: #e74c3c;")
     
     def on_preview_finished(self):
-        """Handle preview calculation completion."""
         self.preview_progress.hide()
         if self.preview_worker:
             self.preview_worker.deleteLater()
             self.preview_worker = None
     
     def display_preview_info(self):
-        """Display compression preview information."""
         if not self.preview_info:
             return
             
         info = self.preview_info
         
-        # Format file sizes with safe defaults
         original_mb = info.get('original_size', 0) / (1024 * 1024)
         compressed_mb = info.get('compressed_size', 0) / (1024 * 1024)
         
-        # Format compression ratio with safe defaults
         ratio = info.get('compression_ratio', 0)
         size_ratio = info.get('size_ratio', 1.0)
         
-        # Ensure all required fields exist
         format_str = info.get('format', 'Unknown')
         quality = info.get('quality', 0)
         dimensions = info.get('dimensions', (0, 0))
         
-        # Create preview text with better formatting
         preview_text = f"""📊 Compression Results:
 
 Original: {original_mb:.2f} MB
@@ -373,31 +340,28 @@ Format: {format_str}
 Quality: {quality}
 Dimensions: {dimensions[0]} × {dimensions[1]}"""
         
-        # Color coding based on compression effectiveness
         if ratio > 60:
-            color = "#27ae60"  # Green - excellent compression
+            color = "#27ae60"
             status = "Excellent compression"
         elif ratio > 30:
-            color = "#f39c12"  # Orange - good compression
+            color = "#f39c12"
             status = "Good compression"
         elif ratio > 10:
-            color = "#e67e22"  # Orange-red - fair compression
+            color = "#e67e22"
             status = "Fair compression"
         else:
-            color = "#e74c3c"  # Red - poor compression
+            color = "#e74c3c"
             status = "Limited compression"
         
         preview_text += f"\n\n🎯 Status: {status}"
         
         self.preview_label.setText(preview_text)
         
-        # Update label color
         style = self.preview_label.styleSheet()
         base_style = style.split("color:")[0] if "color:" in style else style
         self.preview_label.setStyleSheet(f"{base_style}color: {color};")
     
     def get_compression_settings(self):
-        """Get current compression settings."""
         max_size = None
         if self.resize_checkbox.isChecked():
             max_size = (self.width_spinbox.value(), self.height_spinbox.value())
@@ -409,7 +373,6 @@ Dimensions: {dimensions[0]} × {dimensions[1]}"""
         }
     
     def closeEvent(self, event):
-        """Handle dialog close event."""
         if self.preview_worker and self.preview_worker.isRunning():
             self.preview_worker.quit()
             self.preview_worker.wait()

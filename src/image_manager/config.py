@@ -1,22 +1,18 @@
-
 from pathlib import Path
 from PySide6.QtGui import QIcon
 
-# --- Base Paths ---
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent.parent
 ICONS_DIR = ROOT_DIR / "icons"
 LIBRARY_DIR = ROOT_DIR / "image_library"
-INTERNAL_DATA_DIR = ROOT_DIR / ".image_manager_data" # New internal data directory
+INTERNAL_DATA_DIR = ROOT_DIR / ".image_manager_data"
 THUMBNAIL_DIR = INTERNAL_DATA_DIR / "thumbnails"
 METADATA_FILE = INTERNAL_DATA_DIR / "metadata.json"
 
 
-# --- UI Constants ---
 THUMBNAIL_SIZE = (128, 128)
-GRID_SPACING = (138, 160) # Increased height for filenames
+GRID_SPACING = (138, 160)
 
-# --- Icons ---
 ICONS = {
     "import": QIcon(str(ICONS_DIR / "import.svg")),
     "delete": QIcon(str(ICONS_DIR / "delete.svg")),
@@ -36,7 +32,6 @@ ICONS = {
     "compress": QIcon(str(ICONS_DIR / "compress.svg")),
 }
 
-# --- Stylesheet ---
 MODERN_QSS = '''
 QWidget {
     background-color: #2c3e50;
@@ -149,11 +144,11 @@ QProgressBar:disabled {
 QScrollBar:vertical {
     border: none;
     background: #2c3e50;
-    width: 8px; /* Smaller width */
+    width: 8px;
     margin: 0px 0px 0px 0px;
 }
 QScrollBar::handle:vertical {
-    background: #3498db; /* Blue handle */
+    background: #3498db;
     min-height: 20px;
     border-radius: 4px;
 }
@@ -172,11 +167,11 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 QScrollBar:horizontal {
     border: none;
     background: #2c3e50;
-    height: 8px; /* Smaller height */
+    height: 8px;
     margin: 0px 0px 0px 0px;
 }
 QScrollBar::handle:horizontal {
-    background: #3498db; /* Blue handle */
+    background: #3498db;
     min-width: 20px;
     border-radius: 4px;
 }

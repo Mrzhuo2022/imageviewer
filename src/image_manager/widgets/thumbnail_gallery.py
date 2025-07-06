@@ -1,47 +1,42 @@
+import os
+import shutil
+from pathlib import Path
+from PIL import Image
 from PySide6.QtCore import Qt, QSize, Signal, QSortFilterProxyModel
-from PySide6.QtGui import QIcon, QStandardItemModel, QStandardItem, QPixmap, QKeyEvent
+from PySide6.QtGui import QIcon, QStandardItemModel, QStandardItem, QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QListView, QLineEdit, QMenu, QMessageBox, QInputDialog, QLabel, QDialog, QScrollArea, QPushButton, QHBoxLayout
+    QWidget, QVBoxLayout, QListView, QLineEdit, QMenu, QMessageBox, QInputDialog, QScrollArea, QPushButton, QHBoxLayout
 )
-
+from ..config import ICONS, THUMBNAIL_SIZE, GRID_SPACING, LIBRARY_DIR, THUMBNAIL_DIR
+from .. import image_utils
 from .folder_selection_dialog import FolderSelectionDialog
 
 class HorizontalScrollArea(QScrollArea):
     def wheelEvent(self, event):
-        if event.modifiers() == Qt.NoModifier: # Only scroll horizontally if no modifier keys are pressed
+        if event.modifiers() == Qt.NoModifier:
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - event.angleDelta().y())
             event.accept()
         else:
             super().wheelEvent(event)
 
-
-import os
-import shutil
-from pathlib import Path
-from PIL import Image
-
-from ..config import ICONS, THUMBNAIL_SIZE, GRID_SPACING, LIBRARY_DIR, THUMBNAIL_DIR, ROOT_DIR
-from .. import image_utils
-
 class ThumbnailGallery(QWidget):
-    image_selected = Signal(object) # Emits image_data dict when an image is selected
-    status_message = Signal(str, int) # Emits message and timeout for status bar
-    library_updated = Signal() # Emits when images are added/deleted/renamed
+    image_selected = Signal(object)
+    status_message = Signal(str, int)
+    library_updated = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.current_folder = "" # Represents the current folder being viewed
+        self.current_folder = ""
         self.init_ui()
 
     def init_ui(self):
         self.layout = QVBoxLayout(self)
         
-        # Category buttons (horizontal scrollable)
         self.category_scroll_area = HorizontalScrollArea()
         self.category_scroll_area.setWidgetResizable(True)
-        self.category_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # Hide horizontal scrollbar
+        self.category_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.category_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.category_scroll_area.setFixedHeight(40) # Set fixed height for the button area
+        self.category_scroll_area.setFixedHeight(40)
 
         self.category_buttons_widget = QWidget()
         self.category_buttons_layout = QHBoxLayout(self.category_buttons_widget)
@@ -50,7 +45,6 @@ class ThumbnailGallery(QWidget):
         self.category_scroll_area.setWidget(self.category_buttons_widget)
         self.layout.addWidget(self.category_scroll_area)
 
-        # Set context menu policy for the category buttons widget
         self.category_buttons_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_buttons_widget.customContextMenuRequested.connect(self.show_category_context_menu)
 
@@ -64,7 +58,7 @@ class ThumbnailGallery(QWidget):
         self.proxy_model = QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.thumbnail_model)
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        self.proxy_model.setFilterKeyColumn(0) # Filter based on the text (filename)
+        self.proxy_model.setFilterKeyColumn(0)
 
         self.thumbnail_view.setModel(self.proxy_model)
         self.thumbnail_view.setViewMode(QListView.IconMode)
@@ -132,7 +126,7 @@ class ThumbnailGallery(QWidget):
                     if not has_subdirectories:
                         all_top_level_folders.add(entry.name)
             
-            for folder_name in sorted(list(all_top_level_folders)):
+            for folder_name in sorted(all_top_level_folders):
                 folder_button = QPushButton(folder_name)
                 folder_button.setCheckable(True)
                 folder_button.setFixedWidth(100)
@@ -338,7 +332,7 @@ class ThumbnailGallery(QWidget):
             
             if moved_count > 0:
                 image_utils.save_metadata(metadata)
-                self.status_message.emit(f"Moved {moved_count} images to '{new_subfolder if new_subfolder else "Root"}'.", 5000)
+                self.status_message.emit(f"Moved {moved_count} images to '{new_subfolder if new_subfolder else 'Root'}'.", 5000)
                 self.load_thumbnails(self.current_folder)
 
     def delete_selected_images(self):
